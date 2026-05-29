@@ -1,114 +1,62 @@
-# PairUp — Deployment Guide
+# PairUp — Team Bonding Game (v2.1)
 
-A team-bonding game where strangers find each other by color-matching their phones, then complete bonding activities together.
+Mobile-first browser game. Participants join via 4-digit code/QR, get paired by matching colors on their phones, and complete bonding activities over 10 rounds.
 
-## What you're deploying
+## What's in this version
 
-A static React app + a Firebase Realtime Database. Total cost: **$0** on free tiers, even for ~100 concurrent participants.
+**10 rounds, 3 categories:**
+- Rounds 1–4: *Get to know* — Croatian conversation prompts (3 min each, thumbs voting)
+- Rounds 5–7: *Riddles & challenges* — vic, zdravica, plus mathematical/verbal puzzles (2 min each)
+- Rounds 8–10: *Mini games* — Clicking Contest, Kamen/Papir/Škare, Mini Quiz (1 min each)
 
----
+**Scoring:**
+- *Thumbs categories:* all thumbs up = 2 pts each, mostly up = 1 pt each, otherwise 0
+- *Equations:* 1 pt if correct, 0 if wrong
+- *Mini games:* winner gets 1 pt
+- **Speed bonus (hidden):** fastest 3 groups per round get 2× points
 
-## Part 1 — Set up Firebase (10 min)
+**Triads:** rounds 3 and 6 use groups of 3 (round 9 stays as pairs since mini-games can't be triads). 5-second heads-up screen first.
 
-1. Go to https://console.firebase.google.com and sign in with a Google account.
-2. Click **Add project**. Name it `pairup` (or whatever). Disable Google Analytics — you don't need it. Click **Create project**.
-3. In the left sidebar, click **Build → Realtime Database**. Click **Create Database**.
-   - Pick a region close to your event.
-   - Choose **Start in test mode**. (We'll lock it down in a moment.)
-4. Once created, click the **Rules** tab and paste this in, then **Publish**:
-   ```json
-   {
-     "rules": {
-       "session": {
-         ".read": true,
-         ".write": true
-       }
-     }
-   }
-   ```
-   This allows anyone to read/write the single session object. Fine for a one-off event — see the "Hardening" section if you want stricter rules.
-5. Click the **gear icon** at the top left → **Project settings**.
-6. Scroll down to **Your apps**. Click the **`</>`** (web) icon to register a web app. Name it `pairup-web`. **Skip** Firebase Hosting (we'll use Vercel). Click **Register app**.
-7. Firebase shows you a `firebaseConfig` object. Copy it. It looks like:
-   ```js
-   const firebaseConfig = {
-     apiKey: "AIzaSyB...",
-     authDomain: "pairup-abc12.firebaseapp.com",
-     databaseURL: "https://pairup-abc12-default-rtdb.firebaseio.com",
-     projectId: "pairup-abc12",
-     ...
-   };
-   ```
-8. Open `src/firebase.js` in this project and replace the placeholder `firebaseConfig` object with yours.
+**Hidden profile:** 3 Croatian questions on join (godišnje doba, snack, piće). Grouped statistics shown at game end.
 
-> **Important:** The `databaseURL` field is required and isn't in every Firebase template — make sure it's present and points to your Realtime Database. If your DB region is europe or asia it'll look like `https://...europe-west1.firebasedatabase.app`.
+**Returning pairs:** Pairings are random; a "♻︎ Reunion" badge appears when re-paired.
 
----
+**30 colors total**, each with its name shown.
 
-## Part 2 — Test locally (2 min)
+## Mini games (specific)
 
+1. **Clicking Contest** — Most clicks in 1 minute wins. Local optimistic counter for snappy feel, throttled push to Firebase every 250ms.
+2. **Kamen, Papir, Škare** — Best of 3 (first to 2 wins). Croatian labels (Kamen / Papir / Škare).
+3. **Mini Quiz** — 3 sequential questions (Valcon-specific). Each player progresses independently. Winner = most correct, tiebreak by fastest total time.
+
+## Setup
+
+### 1. Firebase
+1. Create a free Firebase project at https://console.firebase.google.com
+2. Add a Web app, copy the config into `src/firebase.js`
+3. Enable **Realtime Database** (start in test mode)
+4. Set rules to:
+```json
+{ "rules": { "session": { ".read": true, ".write": true } } }
+```
+
+### 2. Local
 ```bash
 npm install
 npm run dev
 ```
+Open http://localhost:5173 — `#host` for host, `#join` for participants.
 
-Open the URL shown (usually `http://localhost:5173`). Open it again in an incognito window to simulate a second device. One window picks "I'm hosting", the other picks "I'm a participant" and uses the code. Confirm pairing works.
-
----
-
-## Part 3 — Deploy to Vercel (5 min)
-
-The fastest free hosting for a Vite app. You'll need a GitHub account.
-
-1. Push this folder to a new GitHub repo:
-   ```bash
-   git init
-   git add .
-   git commit -m "Initial commit"
-   # Create a new empty repo on github.com first, then:
-   git remote add origin https://github.com/YOUR_USERNAME/pairup.git
-   git branch -M main
-   git push -u origin main
-   ```
-
-2. Go to https://vercel.com and sign in with GitHub.
-3. Click **Add New → Project**. Pick your `pairup` repo. Click **Import**.
-4. Vercel auto-detects Vite — leave all settings as default. Click **Deploy**.
-5. About 60 seconds later, you'll get a URL like `pairup-abc.vercel.app`. Open it. You're live.
-
-Every `git push` to `main` from now on redeploys automatically.
-
----
-
-## Part 4 — Day of the event
-
-1. Open the deployed URL on your laptop. Tap **"I'm hosting"** → **"Create session"**.
-2. Project your screen (HDMI/AirPlay/etc) so attendees see the join code and QR.
-3. Tell people: *"Scan the QR or visit [your URL] and enter the code."*
-4. Watch participants appear in the list. Once you have enough, tap **"Start round 1"**.
-5. Wait until most pairs have confirmed (the counter shows live progress), then tap **"Reveal activity"**.
-6. Give pairs 3–5 minutes per activity, then tap **"New round"** for a fresh shuffle.
-
----
+### 3. Deploy
+- Push to GitHub → import to Vercel → done.
 
 ## Customizing
+- Questions/riddles in `src/App.jsx`: search for `GET_TO_KNOW`, `RIDDLES`, `MINI_QUIZ_QUESTIONS`
+- Colors: search for `const COLORS`
+- Round timing: search for `getRoundConfig` and the `PAIRING_MS`/`VOTING_MS`/`RESULTS_MS` constants
 
-- **Activities**: edit the `ACTIVITIES` array near the top of `src/App.jsx`.
-- **Colors**: edit `COLORS` (15 colors → supports up to 30 people per round before reuse — add more if your event is bigger).
-- **Branding**: search for `"PairUp"` and the orange hex `#FF8906` in `src/App.jsx`.
-
-After any change, push to GitHub — Vercel redeploys automatically.
-
----
-
-## Hardening (optional, recommended if you'll reuse this)
-
-The default rules allow anyone with your Firebase URL to overwrite the session. For a single event behind a known URL this is fine, but for repeated use:
-
-**Option A — Multiple sessions keyed by code.** Restructure storage so each code has its own path (`sessions/1234`, `sessions/5678`). Add a host password check before allowing writes to a session.
-
-**Option B — Add a time limit.** Use Firebase rules to reject writes older than X hours, so abandoned sessions auto-expire.
-
-**Option C — Add Firebase Auth (anonymous)** and tie session ownership to a uid. Heavier lift, but proper.
-
-For a single company event, none of this is required — just delete the Realtime Database when you're done.
+## Notes / limitations
+- One session at a time globally (single event)
+- No host auth — keep the URL private
+- If host disconnects mid-round, timers stall until they reconnect
+- Activity prompts and labels are now mostly in Croatian; some chrome (HOST DASHBOARD, MINI GAME tags) stays in English
