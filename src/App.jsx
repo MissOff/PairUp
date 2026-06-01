@@ -5,7 +5,6 @@ import { db } from './firebase';
 // ============================================================
 // PAIR UP — Team Bonding Game v2
 // ============================================================
-const SESSION_PATH = 'session';
 
 // ---------- COLORS (30) ----------
 const COLORS = [
@@ -47,6 +46,23 @@ const PROFILE_QUESTIONS = [
   { key: 'snack',  label: 'Koji ti je najdraži snack?',          placeholder: 'npr. čokolada' },
   { key: 'drink',  label: 'Koje ti je najdraže piće?',           placeholder: 'npr. kava' },
 ];
+
+// ---------- RULEBOOK (shown to participants on join, before profile) ----------
+// EDIT THESE 5 POINTS — these are placeholders.
+const RULEBOOK = [
+  "Igra ima 10 rundi raspoređenih u 3 kategorije.",
+  "Tvoj par mijenja se svaku rundu — pronađi osobu s istom bojom na ekranu.",
+  "Svaka runda ima vremensko ograničenje. Budi brz!",
+  "Bodovi se zbrajaju kroz cijelu igru — pobjednik se otkriva na kraju.",
+  "Najvažnije — zabavi se i upoznaj nove ljude!",
+];
+
+// ---------- CATEGORY TITLES (shown before each round) ----------
+const CATEGORY_TITLES = {
+  'get-to-know': 'Upoznaj svog para',
+  'riddles':     'Izazov ili zagonetka',
+  'mini-games':  'Brza igra',
+};
 
 // ---------- ACTIVITIES ----------
 // Get to know — 12 questions (need 4 per game). Thumbs voting.
@@ -91,37 +107,92 @@ const MINI_QUIZ_QUESTIONS = [
 // 4 get-to-know (3min) + 3 riddles (2min) + 3 mini-games (1min) = 10 rounds
 const TOTAL_ROUNDS = 10;
 const PAIRING_MS  = 60_000;   // 60s to find your group
-const VOTING_MS   = 30_000;   // 30s to vote thumbs
+const PAIRING_EXT_MS = 10_000; // extra 10s if not everyone found by first deadline
+const VOTING_MS   = 15_000;   // 15s to vote thumbs
 const TRIAD_ANNOUNCE_MS = 5_000;
-const RESULTS_MS  = 8_000;
+const CATEGORY_ANNOUNCE_MS = 3_000;
+const BETWEEN_MS  = 3_000;    // brief pause between rounds (no points reveal)
+const CLICKING_COUNTDOWN_MS = 3_000; // 3-2-1 before clicking game starts
 
-function getRoundConfig(round) {
-  if (round <= 4) return { category: 'get-to-know', durationMs: 180_000, label: 'Get to know' };
-  if (round <= 7) return { category: 'riddles',     durationMs: 120_000, label: 'Riddles & challenges' };
-  return                  { category: 'mini-games', durationMs: 60_000,  label: 'Mini games' };
+function getCategoryForRound(session, round) {
+  const order = session?.categoryOrder || ['get-to-know','get-to-know','get-to-know','get-to-know','riddles','riddles','riddles','mini-games','mini-games','mini-games'];
+  return order[round - 1] || 'get-to-know';
 }
 
-function isTriadRound(round) {
+function getRoundConfig(session, round) {
+  const category = getCategoryForRound(session, round);
+  if (category === 'get-to-know') return { category, durationMs: 180_000, label: CATEGORY_TITLES['get-to-know'] };
+  if (category === 'riddles')     return { category, durationMs: 120_000, label: CATEGORY_TITLES['riddles'] };
+  return                                 { category, durationMs: 60_000,  label: CATEGORY_TITLES['mini-games'] };
+}
+
+function isTriadRound(session, round) {
   if (round % 3 !== 0) return false;
-  const cfg = getRoundConfig(round);
-  return cfg.category !== 'mini-games'; // no triads in mini-games
+  return getCategoryForRound(session, round) !== 'mini-games';
 }
 
-// ---------- FIREBASE HELPERS ----------
-async function getSession() {
-  try { const s = await get(ref(db, SESSION_PATH)); return s.exists() ? s.val() : null; }
+// Constrained shuffle: 10 rounds (4 get-to-know, 3 riddles, 3 mini-games)
+// with the constraint that mini-games never land on positions 3, 6, or 9
+// (where triad rounds happen). Uses rejection sampling.
+function shuffleCategoryOrder() {
+  const base = [
+    'get-to-know','get-to-know','get-to-know','get-to-know',
+    'riddles','riddles','riddles',
+    'mini-games','mini-games','mini-games',
+  ];
+  const triadPositions = [2, 5, 8]; // 0-indexed for rounds 3, 6, 9
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const order = shuffle(base);
+    if (triadPositions.every(p => order[p] !== 'mini-games')) return order;
+  }
+  // Fallback: manually place mini-games in non-triad slots
+  const nonTriadSlots = [0,1,3,4,6,7,9];
+  const positions = shuffle(nonTriadSlots).slice(0, 3);
+  const result = [];
+  let giIdx = 0, rIdx = 0;
+  const gtk = 4, rid = 3;
+  for (let i = 0; i < 10; i++) {
+    if (positions.includes(i)) result[i] = 'mini-games';
+  }
+  for (let i = 0; i < 10; i++) {
+    if (result[i]) continue;
+    if (giIdx < gtk) { result[i] = 'get-to-know'; giIdx++; }
+    else if (rIdx < rid) { result[i] = 'riddles'; rIdx++; }
+  }
+  return result;
+}
+
+// ---------- FIREBASE HELPERS (multi-session: keyed by 4-digit code) ----------
+function sessionPath(code) { return `sessions/${code}`; }
+
+async function getSession(code) {
+  if (!code) return null;
+  try { const s = await get(ref(db, sessionPath(code))); return s.exists() ? s.val() : null; }
   catch (e) { console.error(e); return null; }
 }
-async function setSession(s) {
-  try { await set(ref(db, SESSION_PATH), s); return true; }
+async function setSession(code, s) {
+  if (!code) return false;
+  try { await set(ref(db, sessionPath(code)), s); return true; }
   catch (e) { console.error(e); return false; }
 }
-async function deleteSession() {
-  try { await remove(ref(db, SESSION_PATH)); return true; }
+async function deleteSession(code) {
+  if (!code) return false;
+  try { await remove(ref(db, sessionPath(code))); return true; }
   catch (e) { console.error(e); return false; }
 }
-function subscribeToSession(cb) {
-  return onValue(ref(db, SESSION_PATH), (s) => cb(s.exists() ? s.val() : null));
+function subscribeToSession(code, cb) {
+  if (!code) { cb(null); return () => {}; }
+  return onValue(ref(db, sessionPath(code)), (s) => cb(s.exists() ? s.val() : null));
+}
+
+async function findUniqueCode() {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const c = generateCode();
+    const existing = await getSession(c);
+    if (!existing) return c;
+  }
+  // Fallback: use timestamp-based code if all else fails
+  return generateCode();
 }
 
 // ---------- UTILITIES ----------
@@ -222,6 +293,8 @@ const baseStyles = `
   .pu-spin { animation: pu-spin 1s linear infinite; }
   @keyframes pu-flash { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
   .pu-flash { animation: pu-flash 1s ease-in-out infinite; }
+  @keyframes pu-blink { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(0.55); } }
+  .pu-blink { animation: pu-blink 0.6s ease-in-out infinite; }
 `;
 
 // ============================================================
@@ -247,7 +320,7 @@ function Countdown({ deadline, urgentAt = 10 }) {
       fontFamily: 'Fraunces, serif',
       fontWeight: 800,
       fontSize: 28,
-      color: urgent ? '#F25F4C' : '#FF8906',
+      color: urgent ? '#F25F4C' : '#FFFFFE',
       letterSpacing: '0.04em',
     }}>
       {mm}:{ss.toString().padStart(2, '0')}
@@ -255,9 +328,9 @@ function Countdown({ deadline, urgentAt = 10 }) {
   );
 }
 
-function getJoinUrl() {
+function getJoinUrl(code) {
   const { origin, pathname } = window.location;
-  return `${origin}${pathname}#join`;
+  return `${origin}${pathname}#join=${code || ''}`;
 }
 
 function QRCode({ value, size = 140 }) {
@@ -295,7 +368,7 @@ function QRCode({ value, size = 140 }) {
 }
 
 function JoinCard({ code }) {
-  const joinUrl = getJoinUrl();
+  const joinUrl = getJoinUrl(code);
   return (
     <div style={{
       background: 'linear-gradient(135deg, #FF8906 0%, #F25F4C 100%)',
@@ -313,10 +386,10 @@ function JoinCard({ code }) {
   );
 }
 
-function CopyLinkRow() {
+function CopyLinkRow({ code }) {
   const [copied, setCopied] = useState(false);
   const onCopy = async () => {
-    const joinUrl = getJoinUrl();
+    const joinUrl = getJoinUrl(code);
     try { await navigator.clipboard.writeText(joinUrl); setCopied(true); setTimeout(() => setCopied(false), 1800); }
     catch {
       const ta = document.createElement('textarea');
@@ -389,7 +462,7 @@ function buildActivityPlan() {
 }
 
 function getRoundActivity(session, round) {
-  const cfg = getRoundConfig(round);
+  const cfg = getRoundConfig(session, round);
   const plan = session.activityPlan || {};
   if (cfg.category === 'get-to-know') {
     const slot = round - 1; // 0..3
@@ -458,9 +531,8 @@ function scoreRound(session, round) {
     let basePerPerson = 0;
     if (activity.kind === 'thumbs') {
       const ups = g.filter(id => v.thumbs && v.thumbs[id] === 'up').length;
-      if (ups === g.length) basePerPerson = 2;
-      else if (ups >= g.length - 1 && g.length >= 2) basePerPerson = 1;
-      else basePerPerson = 0;
+      // New rule: only if EVERYONE in the group gave thumbs up = 1 pt each. Otherwise 0.
+      basePerPerson = (ups === g.length) ? 1 : 0;
     } else if (activity.kind === 'equation') {
       basePerPerson = v.correct ? 1 : 0;
     } else if (activity.kind === 'mini-game') {
@@ -518,30 +590,41 @@ function scoreRound(session, round) {
 // HOST DASHBOARD
 // ============================================================
 function HostDashboard({ onBack }) {
+  // Session code is in URL hash (#host=1234) so refresh reconnects to same session.
+  const [code, setCode] = useState(() => {
+    const m = window.location.hash.match(/#host=(\d{4})/);
+    return m ? m[1] : null;
+  });
   const [session, setSessionState] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!!code);
   const [creating, setCreating] = useState(false);
   const tickBusy = useRef(false);
 
   useEffect(() => {
-    const unsub = subscribeToSession((s) => { setSessionState(s); setLoading(false); });
+    if (!code) { setLoading(false); return; }
+    const unsub = subscribeToSession(code, (s) => { setSessionState(s); setLoading(false); });
     return unsub;
-  }, []);
+  }, [code]);
 
   // ----- HOST TICK LOOP: advance phases when deadlines pass -----
   useEffect(() => {
+    if (!code) return;
     const id = setInterval(async () => {
       if (tickBusy.current) return;
-      const s = await getSession();
+      const s = await getSession(code);
       if (!s) return;
       const now = Date.now();
       try {
         tickBusy.current = true;
+        // category-announce timeout → triad-announce OR pairing
+        if (s.phase === 'category-announce' && s.categoryAnnounceDeadline && now >= s.categoryAnnounceDeadline) {
+          await afterCategoryAnnounce(s);
+        }
         // triad-announce timeout → pairing
-        if (s.phase === 'triad-announce' && s.triadAnnounceDeadline && now >= s.triadAnnounceDeadline) {
+        else if (s.phase === 'triad-announce' && s.triadAnnounceDeadline && now >= s.triadAnnounceDeadline) {
           await beginPairing(s);
         }
-        // pairing timeout OR all found → activity
+        // pairing: handle extension + final timeout
         else if (s.phase === 'pairing' && s.pairingDeadline) {
           const groups = s.groups || [];
           const confirmed = s.foundConfirmed || {};
@@ -549,11 +632,19 @@ function HostDashboard({ onBack }) {
             const c = confirmed[groupKey(g)] || {};
             return g.every(id => c[id]);
           });
-          if (allFound || now >= s.pairingDeadline) {
+          if (allFound) {
             await beginActivity(s);
+          } else if (now >= s.pairingDeadline) {
+            if (!s.pairingExtended) {
+              // First deadline reached, not everyone found — extend by 10s and signal blink
+              await setSession(code, { ...s, pairingExtended: true, pairingDeadline: now + PAIRING_EXT_MS });
+            } else {
+              // Extension expired — force advance
+              await beginActivity(s);
+            }
           }
         }
-        // activity timeout OR all groups done → voting (or directly to results for equation/mini-game)
+        // activity timeout OR all groups done → voting (or directly to finalize for non-thumbs)
         else if (s.phase === 'activity' && s.activityDeadline) {
           const activity = s.currentActivity || {};
           const groups = s.groups || [];
@@ -567,7 +658,7 @@ function HostDashboard({ onBack }) {
             }
           }
         }
-        // voting timeout OR all voted → results
+        // voting timeout OR all voted → finalize
         else if (s.phase === 'voting' && s.votingDeadline) {
           const groups = s.groups || [];
           const voting = s.voting || {};
@@ -576,21 +667,22 @@ function HostDashboard({ onBack }) {
             await finalizeRound(s);
           }
         }
-        // results auto-advance to next round (or final) for smoother flow
-        else if (s.phase === 'results' && s.resultsDeadline && now >= s.resultsDeadline) {
-          await nextRoundOrFinish(s);
+        // between: brief pause, then auto-advance to next round (no points reveal)
+        else if (s.phase === 'between' && s.betweenDeadline && now >= s.betweenDeadline) {
+          await advanceToNextRound(s);
         }
       } catch (e) { console.error('Tick error', e); }
       finally { tickBusy.current = false; }
     }, 1000);
     return () => clearInterval(id);
-  }, []);
+  }, [code]);
 
   // ----- STATE TRANSITIONS -----
   const createSession = async () => {
     setCreating(true);
+    const newCode = await findUniqueCode();
     const newSession = {
-      code: generateCode(),
+      code: newCode,
       createdAt: Date.now(),
       phase: 'lobby',
       round: 0,
@@ -601,28 +693,31 @@ function HostDashboard({ onBack }) {
       voting: {},
       pastGroups: [],
       activityPlan: buildActivityPlan(),
+      categoryOrder: shuffleCategoryOrder(),
       currentActivity: null,
       hasReunion: false,
     };
-    await setSession(newSession);
+    await setSession(newCode, newSession);
+    setCode(newCode);
+    window.location.hash = `host=${newCode}`;
     setCreating(false);
   };
 
   const beginPairing = async (sFromCaller) => {
-    const s = sFromCaller || await getSession();
+    const s = sFromCaller || await getSession(code);
     if (!s) return;
     const ids = Object.keys(s.participants || {});
     if (ids.length < 2) { alert('Need at least 2 participants.'); return; }
-    // If coming from triad-announce, round was already set by startRound; otherwise compute.
-    const targetRound = (s.phase === 'triad-announce') ? s.round : (s.phase === 'lobby' ? 1 : s.round + 1);
-    const groups = makeGroups(ids, isTriadRound(targetRound));
+    // By now `s.round` has been set by startRound (via category-announce phase). Just use it.
+    const targetRound = s.round;
+    const groups = makeGroups(ids, isTriadRound(s, targetRound));
     const colors = {};
     groups.forEach((g, i) => {
       const colorIdx = i % COLORS.length;
       g.forEach(id => { colors[id] = colorIdx; });
     });
     const hasReunion = groups.some(g => detectReturning(g, s.pastGroups || []));
-    await setSession({
+    await setSession(code, {
       ...s,
       phase: 'pairing',
       round: targetRound,
@@ -632,45 +727,43 @@ function HostDashboard({ onBack }) {
       voting: {},
       currentActivity: getRoundActivity(s, targetRound),
       pairingDeadline: Date.now() + PAIRING_MS,
+      pairingExtended: false,
       hasReunion,
     });
   };
 
   const startRound = async () => {
-    const s = await getSession();
+    const s = await getSession(code);
     if (!s) return;
     const ids = Object.keys(s.participants || {});
     if (ids.length < 2) { alert('Need at least 2 participants.'); return; }
-    const targetRound = s.phase === 'lobby' ? 1 : s.round + 1;
+    const targetRound = (s.phase === 'lobby' || !s.round) ? 1 : s.round + 1;
     if (targetRound > TOTAL_ROUNDS) { await finishGame(s); return; }
-    if (isTriadRound(targetRound)) {
-      // Triad-announce screen first
-      await setSession({ ...s, phase: 'triad-announce', round: targetRound, triadAnnounceDeadline: Date.now() + TRIAD_ANNOUNCE_MS });
+    // Always show category-announce first (before triad and pairing)
+    await setSession(code, {
+      ...s,
+      phase: 'category-announce',
+      round: targetRound,
+      categoryAnnounceDeadline: Date.now() + CATEGORY_ANNOUNCE_MS,
+    });
+  };
+
+  // After category-announce expires, either show triad-announce or jump to pairing
+  const afterCategoryAnnounce = async (sFromCaller) => {
+    const s = sFromCaller || await getSession(code);
+    if (!s) return;
+    if (isTriadRound(s, s.round)) {
+      await setSession(code, { ...s, phase: 'triad-announce', triadAnnounceDeadline: Date.now() + TRIAD_ANNOUNCE_MS });
     } else {
-      // Skip announce, go straight to pairing
-      const groups = makeGroups(ids, false);
-      const colors = {};
-      groups.forEach((g, i) => { const c = i % COLORS.length; g.forEach(id => { colors[id] = c; }); });
-      const hasReunion = groups.some(g => detectReturning(g, s.pastGroups || []));
-      await setSession({
-        ...s,
-        phase: 'pairing',
-        round: targetRound,
-        groups, colors,
-        foundConfirmed: {},
-        voting: {},
-        currentActivity: getRoundActivity(s, targetRound),
-        pairingDeadline: Date.now() + PAIRING_MS,
-        hasReunion,
-      });
+      await beginPairing(s);
     }
   };
 
   const beginActivity = async (sFromCaller) => {
-    const s = sFromCaller || await getSession();
+    const s = sFromCaller || await getSession(code);
     if (!s) return;
-    const cfg = getRoundConfig(s.round);
-    await setSession({
+    const cfg = getRoundConfig(s, s.round);
+    await setSession(code, {
       ...s,
       phase: 'activity',
       activityDeadline: Date.now() + cfg.durationMs,
@@ -678,9 +771,9 @@ function HostDashboard({ onBack }) {
   };
 
   const beginVoting = async (sFromCaller) => {
-    const s = sFromCaller || await getSession();
+    const s = sFromCaller || await getSession(code);
     if (!s) return;
-    await setSession({
+    await setSession(code, {
       ...s,
       phase: 'voting',
       votingDeadline: Date.now() + VOTING_MS,
@@ -688,7 +781,7 @@ function HostDashboard({ onBack }) {
   };
 
   const finalizeRound = async (sFromCaller) => {
-    const s = sFromCaller || await getSession();
+    const s = sFromCaller || await getSession(code);
     if (!s) return;
     const { pointsAwarded } = scoreRound(s, s.round);
     const participants = { ...(s.participants || {}) };
@@ -699,35 +792,43 @@ function HostDashboard({ onBack }) {
     });
     // Persist past groupings for "returning pair" detection
     const newPast = [...(s.pastGroups || []), ...(s.groups || []).filter(g => g.length >= 2)];
-    await setSession({
+    // Skip the "results" reveal — participants don't see per-round points anymore.
+    // Go straight to 'between' with a short auto-advance timer.
+    await setSession(code, {
       ...s,
-      phase: 'results',
+      phase: 'between',
       participants,
-      lastRoundPoints: pointsAwarded,
       pastGroups: newPast,
-      resultsDeadline: Date.now() + RESULTS_MS,
+      betweenDeadline: Date.now() + BETWEEN_MS,
     });
   };
 
-  const nextRoundOrFinish = async (sFromCaller) => {
-    const s = sFromCaller || await getSession();
+  // Called by tick loop when 'between' phase ends — go to next round or finish
+  const advanceToNextRound = async (sFromCaller) => {
+    const s = sFromCaller || await getSession(code);
     if (!s) return;
     if (s.round >= TOTAL_ROUNDS) {
       await finishGame(s);
     } else {
-      // Set phase back to lobby briefly so host can advance
-      await setSession({ ...s, phase: 'between' });
+      // Auto-advance straight into the next round (category-announce)
+      const targetRound = s.round + 1;
+      await setSession(code, {
+        ...s,
+        phase: 'category-announce',
+        round: targetRound,
+        categoryAnnounceDeadline: Date.now() + CATEGORY_ANNOUNCE_MS,
+      });
     }
   };
 
   const continueToNextRound = async () => {
-    const s = await getSession();
+    const s = await getSession(code);
     if (!s) return;
     await startRound();
   };
 
   const finishGame = async (sFromCaller) => {
-    const s = sFromCaller || await getSession();
+    const s = sFromCaller || await getSession(code);
     if (!s) return;
     // Compute profile statistics
     const stats = { season: {}, snack: {}, drink: {} };
@@ -739,12 +840,15 @@ function HostDashboard({ onBack }) {
         stats[k][v] = (stats[k][v] || 0) + 1;
       });
     });
-    await setSession({ ...s, phase: 'finished', stats });
+    await setSession(code, { ...s, phase: 'finished', stats });
   };
 
   const endSession = async () => {
     if (!window.confirm('End the session? All participants will be disconnected.')) return;
-    await deleteSession();
+    await deleteSession(code);
+    setCode(null);
+    setSessionState(null);
+    window.location.hash = 'host';
   };
 
   // ----- RENDER -----
@@ -779,7 +883,7 @@ function HostDashboard({ onBack }) {
     return g.every(id => c[id]);
   }).length;
   const totalGroups = groups.filter(g => g.length >= 2).length;
-  const cfg = session.round > 0 ? getRoundConfig(session.round) : null;
+  const cfg = session.round > 0 ? getRoundConfig(session, session.round) : null;
 
   return (
     <div className="pu-shell pu-fade" style={{ gap: 18 }}>
@@ -799,7 +903,7 @@ function HostDashboard({ onBack }) {
       {session.phase === 'lobby' && (
         <>
           <JoinCard code={session.code} />
-          <CopyLinkRow />
+          <CopyLinkRow code={session.code} />
         </>
       )}
 
@@ -820,6 +924,7 @@ function HostDashboard({ onBack }) {
           {session.phase === 'activity' && <Countdown deadline={session.activityDeadline} />}
           {session.phase === 'voting' && <Countdown deadline={session.votingDeadline} />}
           {session.phase === 'triad-announce' && <Countdown deadline={session.triadAnnounceDeadline} urgentAt={3} />}
+          {session.phase === 'category-announce' && <Countdown deadline={session.categoryAnnounceDeadline} urgentAt={2} />}
         </div>
 
         {session.phase === 'lobby' && (
@@ -829,19 +934,20 @@ function HostDashboard({ onBack }) {
             </p>
             <button className="pu-btn" onClick={startRound} disabled={participantList.length < 2} style={{
               background: '#FF8906', color: '#0F0E17', fontSize: 15, padding: '14px 20px', borderRadius: 12, width: '100%',
-            }}>Start round 1 → Get to know</button>
+            }}>Start round 1 →</button>
           </>
         )}
 
         {session.phase === 'between' && (
-          <>
-            <p style={{ fontSize: 14, color: 'rgba(255,255,254,0.7)', margin: '0 0 14px' }}>
-              Round {session.round} complete. Ready for round {session.round + 1}?
-            </p>
-            <button className="pu-btn" onClick={continueToNextRound} style={{
-              background: '#FF8906', color: '#0F0E17', fontSize: 15, padding: '14px 20px', borderRadius: 12, width: '100%',
-            }}>Start round {session.round + 1} →</button>
-          </>
+          <p style={{ fontSize: 14, color: 'rgba(255,255,254,0.7)', margin: 0 }}>
+            Round {session.round} scored. Auto-advancing…
+          </p>
+        )}
+
+        {session.phase === 'category-announce' && (
+          <p style={{ fontSize: 14, color: 'rgba(255,255,254,0.7)', margin: 0 }}>
+            Announcing category — {CATEGORY_TITLES[getCategoryForRound(session, session.round)] || '?'}
+          </p>
         )}
 
         {session.phase === 'triad-announce' && (
@@ -852,15 +958,9 @@ function HostDashboard({ onBack }) {
 
         {(session.phase === 'pairing' || session.phase === 'activity' || session.phase === 'voting') && (
           <p style={{ fontSize: 14, color: 'rgba(255,255,254,0.7)', margin: 0, lineHeight: 1.5 }}>
-            {session.phase === 'pairing' && `Finding groups. ${confirmedCount}/${totalGroups} confirmed.`}
+            {session.phase === 'pairing' && `Finding groups. ${confirmedCount}/${totalGroups} confirmed.${session.pairingExtended ? ' (extended +10s)' : ''}`}
             {session.phase === 'activity' && `Activity in progress — ${cfg?.label}.`}
             {session.phase === 'voting' && `Collecting thumbs.`}
-          </p>
-        )}
-
-        {session.phase === 'results' && (
-          <p style={{ fontSize: 14, color: 'rgba(255,255,254,0.7)', margin: 0 }}>
-            Round {session.round} scored. Auto-advancing…
           </p>
         )}
 
@@ -986,27 +1086,31 @@ function StatsBlock({ stats }) {
 // PARTICIPANT FLOW
 // ============================================================
 function ParticipantFlow({ onBack }) {
-  const [step, setStep] = useState('enter'); // enter | profile | wait | game
-  const [code, setCode] = useState('');
+  const [step, setStep] = useState('enter'); // enter | rulebook | profile | wait
+  const [code, setCode] = useState(() => {
+    const m = window.location.hash.match(/#join=(\d{4})/);
+    return m ? m[1] : '';
+  });
+  const [codeConfirmed, setCodeConfirmed] = useState(false);
   const [name, setName] = useState('');
   const [profile, setProfile] = useState({ season: '', snack: '', drink: '' });
   const [error, setError] = useState('');
   const [session, setSessionState] = useState(null);
   const [myId, setMyId] = useState(null);
-  const myIdRef = useRef(null);
 
-  // Subscribe once we're in
+  // Subscribe once we're in (myId set)
   useEffect(() => {
-    if (!myId) return;
-    const unsub = subscribeToSession((s) => {
-      if (!s || s.code !== code) {
-        setError('Session ended by host.');
+    if (!myId || !code) return;
+    const unsub = subscribeToSession(code, (s) => {
+      if (!s) {
+        setError('Sesija je završena.');
         setStep('enter');
-        setMyId(null); myIdRef.current = null;
+        setMyId(null);
+        setSessionState(null);
+        setCodeConfirmed(false);
         return;
       }
       setSessionState(s);
-      if (step === 'wait') setStep('game'); // any phase change moves us into the game loop
     });
     return unsub;
   }, [myId, code]);
@@ -1015,25 +1119,31 @@ function ParticipantFlow({ onBack }) {
   const submitCode = async () => {
     setError('');
     const trimmed = code.trim();
-    if (!/^\d{4}$/.test(trimmed)) { setError('Enter the 4-digit code.'); return; }
-    const s = await getSession();
-    if (!s) { setError('No active session. Ask the host to start one.'); return; }
-    if (s.code !== trimmed) { setError("That code doesn't match the active session."); return; }
-    if (s.phase !== 'lobby') { setError('Game already started — wait for the next event.'); return; }
+    if (!/^\d{4}$/.test(trimmed)) { setError('Unesi 4-znamenkasti kod.'); return; }
+    const s = await getSession(trimmed);
+    if (!s) { setError('Nema aktivne sesije s tim kodom.'); return; }
+    if (s.phase !== 'lobby') { setError('Igra je već započela — pričekaj sljedeću.'); return; }
+    setCode(trimmed);
+    setCodeConfirmed(true);
+    setStep('rulebook');
+  };
+
+  // ----- ACCEPT RULEBOOK -----
+  const acceptRulebook = () => {
     setStep('profile');
   };
 
   // ----- SUBMIT PROFILE -----
   const submitProfile = async () => {
     setError('');
-    if (!name.trim()) { setError('Please enter a name.'); return; }
+    if (!name.trim()) { setError('Upiši svoje ime.'); return; }
     if (!profile.season.trim() || !profile.snack.trim() || !profile.drink.trim()) {
       setError('Molimo te ispuni sva polja.');
       return;
     }
-    const s = await getSession();
-    if (!s) { setError('Session ended.'); setStep('enter'); return; }
-    if (s.phase !== 'lobby') { setError('Game already started.'); setStep('enter'); return; }
+    const s = await getSession(code);
+    if (!s) { setError('Sesija je završila.'); setStep('enter'); return; }
+    if (s.phase !== 'lobby') { setError('Igra je već započela.'); setStep('enter'); return; }
     const id = 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
     const updated = {
       ...s,
@@ -1047,9 +1157,9 @@ function ParticipantFlow({ onBack }) {
         }
       }
     };
-    const ok = await setSession(updated);
-    if (!ok) { setError('Could not join. Try again.'); return; }
-    setMyId(id); myIdRef.current = id;
+    const ok = await setSession(code, updated);
+    if (!ok) { setError('Greška pri pridruživanju. Pokušaj ponovno.'); return; }
+    setMyId(id);
     setStep('wait');
   };
 
@@ -1057,14 +1167,14 @@ function ParticipantFlow({ onBack }) {
   if (step === 'enter') {
     return (
       <div className="pu-shell pu-fade" style={{ justifyContent: 'center', gap: 24 }}>
-        <button onClick={onBack} className="pu-btn" style={{ alignSelf: 'flex-start', background: 'transparent', color: 'rgba(255,255,254,0.5)', fontSize: 14, padding: '8px 0' }}>← back</button>
+        <button onClick={onBack} className="pu-btn" style={{ alignSelf: 'flex-start', background: 'transparent', color: 'rgba(255,255,254,0.5)', fontSize: 14, padding: '8px 0' }}>← natrag</button>
         <div>
-          <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906', marginBottom: 12 }}>JOIN</div>
+          <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906', marginBottom: 12 }}>PRIDRUŽI SE</div>
           <h2 className="pu-display" style={{ fontSize: 48, margin: '0 0 8px' }}>
-            Enter the<br/><em style={{ color: '#FF8906' }}>code.</em>
+            Unesi<br/><em style={{ color: '#FF8906' }}>kod.</em>
           </h2>
           <p style={{ color: 'rgba(255,255,254,0.6)', fontSize: 15, lineHeight: 1.5 }}>
-            Your host has a 4-digit code on screen.
+            Host ima 4-znamenkasti kod na ekranu.
           </p>
         </div>
         <input type="tel" inputMode="numeric" maxLength={4} className="pu-input"
@@ -1074,7 +1184,35 @@ function ParticipantFlow({ onBack }) {
         {error && <div style={{ color: '#F25F4C', fontSize: 14 }}>{error}</div>}
         <button className="pu-btn" onClick={submitCode} style={{
           background: '#FF8906', color: '#0F0E17', fontSize: 17, padding: '18px 24px', borderRadius: 14,
-        }}>Continue →</button>
+        }}>Nastavi →</button>
+      </div>
+    );
+  }
+
+  if (step === 'rulebook') {
+    return (
+      <div className="pu-shell pu-fade" style={{ gap: 20 }}>
+        <div>
+          <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906', marginBottom: 12 }}>PRAVILA</div>
+          <h2 className="pu-display" style={{ fontSize: 38, margin: '0 0 8px' }}>
+            Prije <em style={{ color: '#FF8906' }}>nego</em><br/>krenemo.
+          </h2>
+        </div>
+        <ol style={{ paddingLeft: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 12, margin: 0, flex: 1 }}>
+          {RULEBOOK.map((rule, i) => (
+            <li key={i} style={{
+              display: 'flex', gap: 14, padding: '14px 16px',
+              background: 'rgba(255,255,254,0.04)', border: '1px solid rgba(255,255,254,0.08)',
+              borderRadius: 12,
+            }}>
+              <div className="pu-display" style={{ fontSize: 24, color: '#FF8906', minWidth: 24, lineHeight: 1 }}>{i + 1}</div>
+              <div style={{ fontSize: 15, lineHeight: 1.4, color: 'rgba(255,255,254,0.9)' }}>{rule}</div>
+            </li>
+          ))}
+        </ol>
+        <button className="pu-btn" onClick={acceptRulebook} style={{
+          background: '#FF8906', color: '#0F0E17', fontSize: 17, padding: '18px 24px', borderRadius: 14,
+        }}>Razumijem →</button>
       </div>
     );
   }
@@ -1155,13 +1293,25 @@ function GameScreen({ session, myId, myName }) {
     );
   }
 
-  if (session.phase === 'between') {
-    const myScore = session.participants?.[myId]?.score || 0;
+  if (session.phase === 'category-announce') {
+    const cat = getCategoryForRound(session, session.round);
+    const title = CATEGORY_TITLES[cat] || '';
     return (
       <div className="pu-shell pu-fade" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center', gap: 24 }}>
-        <div className="pu-display" style={{ fontSize: 32, color: '#FF8906' }}>Round {session.round} done.</div>
-        <div className="pu-display" style={{ fontSize: 64 }}>{myScore} <span style={{ fontSize: 24, color: 'rgba(255,255,254,0.5)' }}>pts</span></div>
-        <p style={{ color: 'rgba(255,255,254,0.6)', fontSize: 14 }}>Host će uskoro pokrenuti sljedeću rundu…</p>
+        <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906' }}>RUNDA {session.round}</div>
+        <div className="pu-display" style={{ fontSize: 56, lineHeight: 1.05, color: '#FF8906' }}>
+          {title}
+        </div>
+        <Countdown deadline={session.categoryAnnounceDeadline} urgentAt={2} />
+      </div>
+    );
+  }
+
+  if (session.phase === 'between') {
+    return (
+      <div className="pu-shell pu-fade" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center', gap: 20 }}>
+        <div style={{ fontSize: 11, letterSpacing: '0.3em', color: 'rgba(255,255,254,0.5)' }}>RUNDA {session.round} GOTOVA</div>
+        <div className="pu-display" style={{ fontSize: 40 }}>Spremi se za sljedeću…</div>
       </div>
     );
   }
@@ -1171,10 +1321,10 @@ function GameScreen({ session, myId, myName }) {
       <div className="pu-shell pu-fade" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center', gap: 28 }}>
         <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906' }}>HEADS UP</div>
         <div className="pu-display" style={{ fontSize: 52, lineHeight: 1.05 }}>
-          This round —<br/><em style={{ color: '#FF8906' }}>groups of three.</em>
+          Ova runda —<br/><em style={{ color: '#FF8906' }}>grupe od troje.</em>
         </div>
         <p style={{ color: 'rgba(255,255,254,0.7)', fontSize: 16, maxWidth: 280 }}>
-          You'll be paired up with TWO other people instead of one.
+          Ovaj put traži DVIJE osobe iste boje umjesto jedne.
         </p>
         <Countdown deadline={session.triadAnnounceDeadline} urgentAt={3} />
       </div>
@@ -1188,7 +1338,7 @@ function GameScreen({ session, myId, myName }) {
         <div className="pu-shell pu-fade" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center', gap: 24 }}>
           <div className="pu-display" style={{ fontSize: 60, color: '#FF8906' }}>solo</div>
           <p style={{ color: 'rgba(255,255,254,0.7)', fontSize: 16, lineHeight: 1.6, maxWidth: 280 }}>
-            Odd number — you're sitting this round out. Hang tight for the next.
+            Neparan broj — preskačeš ovu rundu. Vidimo se u sljedećoj.
           </p>
         </div>
       );
@@ -1206,17 +1356,12 @@ function GameScreen({ session, myId, myName }) {
     return <VotingScreen session={session} myId={myId} myGroup={myGroup} />;
   }
 
+  // 'results' phase no longer exists (per-round points hidden from participants).
+  // Kept here as a safe fallback in case any old state arrives:
   if (session.phase === 'results') {
-    const myScore = session.participants?.[myId]?.score || 0;
-    const lastPts = session.lastRoundPoints?.[myId] || 0;
     return (
-      <div className="pu-shell pu-fade" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center', gap: 24 }}>
-        <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906' }}>ROUND {session.round}</div>
-        <div className="pu-display" style={{ fontSize: 90, color: lastPts > 0 ? '#FF8906' : '#FFFFFE' }}>+{lastPts}</div>
-        <p style={{ color: 'rgba(255,255,254,0.6)', fontSize: 16 }}>points this round</p>
-        <div style={{ marginTop: 12, fontSize: 18 }}>
-          Total: <strong className="pu-display" style={{ fontSize: 32, color: '#FF8906' }}>{myScore}</strong>
-        </div>
+      <div className="pu-shell pu-fade" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center', gap: 20 }}>
+        <div className="pu-display" style={{ fontSize: 40 }}>Sljedeća runda dolazi…</div>
       </div>
     );
   }
@@ -1231,7 +1376,7 @@ function GameScreen({ session, myId, myName }) {
 function SitOutScreen() {
   return (
     <div className="pu-shell pu-fade" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center', gap: 20 }}>
-      <p style={{ color: 'rgba(255,255,254,0.7)', fontSize: 16 }}>You sat this round out. Stand by for the next one.</p>
+      <p style={{ color: 'rgba(255,255,254,0.7)', fontSize: 16 }}>Preskačeš ovu rundu. Vidimo se u sljedećoj.</p>
     </div>
   );
 }
@@ -1244,9 +1389,10 @@ function PairingScreen({ session, myId, myGroup }) {
   const color = colorIdx !== undefined ? COLORS[colorIdx] : null;
   const myKey = groupKey(myGroup);
   const myConfirmed = (session.foundConfirmed || {})[myKey]?.[myId];
+  const groupConfirmed = (session.foundConfirmed || {})[myKey] || {};
+  const allConfirmed = myGroup.every(id => groupConfirmed[id]);
   const isReunion = (session.hasReunion === true) && (session.pastGroups || []).some(past => {
     if (!past || past.length < 2) return false;
-    // Returns true if any pair within myGroup also exists in past
     for (let i = 0; i < myGroup.length; i++) for (let j = i + 1; j < myGroup.length; j++) {
       const a = myGroup[i], b = myGroup[j];
       if (past.includes(a) && past.includes(b)) return true;
@@ -1254,13 +1400,27 @@ function PairingScreen({ session, myId, myGroup }) {
     return false;
   });
 
+  // Blink during pairing extension if THIS group still has unconfirmed members
+  const shouldBlink = !!session.pairingExtended && !allConfirmed;
+
+  // Partner profile hints (from hidden profile)
+  const partners = myGroup.filter(id => id !== myId);
+  const partnerHints = partners.map(pid => {
+    const p = session.participants?.[pid];
+    if (!p) return null;
+    const prof = p.profile || {};
+    const bits = [prof.season, prof.snack, prof.drink].filter(Boolean);
+    if (bits.length === 0) return null;
+    return { name: p.name || '?', bits };
+  }).filter(Boolean);
+
   const confirmFound = async () => {
     if (myConfirmed) return;
-    const s = await getSession();
+    const s = await getSession(session.code);
     if (!s) return;
     const fc = s.foundConfirmed || {};
     const existing = fc[myKey] || {};
-    await setSession({
+    await setSession(session.code, {
       ...s,
       foundConfirmed: { ...fc, [myKey]: { ...existing, [myId]: Date.now() } },
     });
@@ -1269,15 +1429,15 @@ function PairingScreen({ session, myId, myGroup }) {
   if (!color) return <div className="pu-shell" style={{ justifyContent: 'center', alignItems: 'center' }}><Spinner /></div>;
 
   return (
-    <div style={{
+    <div className={shouldBlink ? 'pu-blink' : ''} style={{
       position: 'fixed', inset: 0, background: color.bg, color: color.text,
       display: 'flex', flexDirection: 'column', padding: '24px 20px 32px',
       animation: 'pu-fade-in 0.4s ease forwards',
     }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
-          <div style={{ fontSize: 11, letterSpacing: '0.3em', opacity: 0.7 }}>YOUR COLOR</div>
-          {isReunion && <div style={{ fontSize: 12, marginTop: 4, fontStyle: 'italic', opacity: 0.85 }}>♻︎ Reunion — you've met before!</div>}
+          <div style={{ fontSize: 11, letterSpacing: '0.3em', opacity: 0.7 }}>TVOJA BOJA</div>
+          {isReunion && <div style={{ fontSize: 12, marginTop: 4, fontStyle: 'italic', opacity: 0.85 }}>♻︎ Već ste se susreli!</div>}
         </div>
         <Countdown deadline={session.pairingDeadline} />
       </div>
@@ -1285,27 +1445,53 @@ function PairingScreen({ session, myId, myGroup }) {
         {color.name}.
       </div>
       <div style={{ fontSize: 16, opacity: 0.7, marginBottom: 16, fontStyle: 'italic' }}>
-        {myGroup.length === 3 ? 'Find your other TWO people.' : 'Find your one partner.'}
+        {myGroup.length === 3 ? 'Pronađi još DVIJE osobe iste boje.' : 'Pronađi osobu iste boje.'}
       </div>
       <div style={{
         height: 4, width: 80, background: color.text, opacity: 0.4, borderRadius: 2, marginBottom: 16,
       }} />
-      <p style={{ fontSize: 17, lineHeight: 1.5, opacity: 0.9, marginBottom: 'auto', maxWidth: 320 }}>
-        Look around the room for someone whose phone shows <strong>{color.name}</strong>. {myGroup.length === 3 ? 'You\'re a group of three this round.' : 'They\'re your partner.'}
+      <p style={{ fontSize: 16, lineHeight: 1.5, opacity: 0.9, maxWidth: 320, marginBottom: 12 }}>
+        Pogledaj uokolo — tražiš nekoga čiji ekran je <strong>{color.name}</strong>.
       </p>
 
-      <div style={{ marginTop: 32 }}>
+      {/* Hidden-profile hints to help find them */}
+      {partnerHints.length > 0 && (
+        <div style={{ marginBottom: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {partnerHints.map((h, i) => (
+            <div key={i} style={{
+              padding: '12px 14px', borderRadius: 12, background: 'rgba(0,0,0,0.12)',
+              fontSize: 14, lineHeight: 1.4,
+            }}>
+              <span style={{ opacity: 0.7 }}>Ova osoba voli</span>{' '}
+              <strong>{h.bits.join(', ')}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+      {partnerHints.length === 0 && <div style={{ marginBottom: 'auto' }} />}
+
+      {/* Extension banner */}
+      {session.pairingExtended && !allConfirmed && (
+        <div style={{
+          padding: '12px 14px', borderRadius: 12, background: 'rgba(0,0,0,0.2)',
+          fontSize: 14, fontWeight: 600, textAlign: 'center', marginBottom: 12,
+        }}>
+          ⏱ Dodatnih 10 sekundi — požurite!
+        </div>
+      )}
+
+      <div style={{ marginTop: 16 }}>
         {!myConfirmed ? (
           <button className="pu-btn" onClick={confirmFound} style={{
             width: '100%', background: color.text, color: color.bg,
             fontSize: 17, padding: '20px 24px', borderRadius: 16, fontWeight: 700,
-          }}>I found my {myGroup.length === 3 ? 'group' : 'partner'} ✓</button>
+          }}>Pronašao/la sam {myGroup.length === 3 ? 'grupu' : 'para'} ✓</button>
         ) : (
           <div style={{
             padding: '20px 24px', borderRadius: 16, background: 'rgba(0,0,0,0.15)',
             textAlign: 'center', fontSize: 15, fontWeight: 500,
           }}>
-            Confirmed. Hang tight — activity coming up.
+            Potvrđeno. Pričekaj — aktivnost dolazi uskoro.
           </div>
         )}
       </div>
@@ -1320,7 +1506,7 @@ function ActivityScreen({ session, myId, myGroup, myName }) {
   const activity = session.currentActivity || {};
   const colorIdx = (session.colors || {})[myId];
   const color = COLORS[colorIdx] || COLORS[0];
-  const cfg = getRoundConfig(session.round);
+  const cfg = getRoundConfig(session, session.round);
   const partners = myGroup.filter(id => id !== myId).map(id => session.participants?.[id]?.name || '?').join(' & ');
 
   const header = (
@@ -1393,11 +1579,11 @@ function EquationActivity({ session, myId, myGroup, color, header, activity }) {
 
   const submit = async () => {
     if (submitted || !answer.trim()) return;
-    const s = await getSession();
+    const s = await getSession(session.code);
     if (!s) return;
     const correct = checkAnswer(answer, activity.answers || []);
     const voting = s.voting || {};
-    await setSession({
+    await setSession(session.code, {
       ...s,
       voting: { ...voting, [myKey]: { ...(voting[myKey] || {}), answer, correct, finishedAt: Date.now() } },
     });
@@ -1452,7 +1638,7 @@ function RPSGame({ session, myId, myGroup, color, header }) {
 
   const pick = async (choice) => {
     if (finished || myCurrent) return;
-    const s = await getSession();
+    const s = await getSession(session.code);
     if (!s) return;
     const v = s.voting || {};
     const cur = v[myKey] || {};
@@ -1472,7 +1658,7 @@ function RPSGame({ session, myId, myGroup, color, header }) {
       else if (partnerWins >= 2) updates = { ...updates, winnerId: partnerId, finishedAt: Date.now() };
     }
 
-    await setSession({ ...s, voting: { ...v, [myKey]: updates } });
+    await setSession(session.code, { ...s, voting: { ...v, [myKey]: updates } });
   };
 
   const lastRound = rounds[rounds.length - 1];
@@ -1569,6 +1755,23 @@ function ClickingContestGame({ session, myId, myGroup, color, header }) {
   const partnerId = myGroup.find(id => id !== myId);
   const partnerTaps = taps[partnerId] || 0;
 
+  // Compute time remaining locally so button disables exactly at expiry.
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 200);
+    return () => clearInterval(id);
+  }, []);
+  const activityDeadline = session.activityDeadline || 0;
+  // Activity duration is 60s; clicking starts after a 3-2-1 countdown derived from deadline.
+  // We anchor the countdown to the deadline so all clients agree.
+  const cfg = getRoundConfig(session, session.round);
+  const activityStartedAt = activityDeadline - cfg.durationMs;
+  const countdownEnd = activityStartedAt + CLICKING_COUNTDOWN_MS;
+  const inCountdown = now < countdownEnd;
+  const countdownSec = Math.max(0, Math.ceil((countdownEnd - now) / 1000));
+  const timeExpired = now >= activityDeadline;
+  const canTap = !finished && !inCountdown && !timeExpired;
+
   // Local optimistic counter for snappy taps
   const [localTaps, setLocalTaps] = useState(myTaps);
   const lastPushed = useRef(myTaps);
@@ -1582,20 +1785,20 @@ function ClickingContestGame({ session, myId, myGroup, color, header }) {
     const interval = setInterval(async () => {
       const t = localTapsRef.current;
       if (t === lastPushed.current) return;
-      const s = await getSession();
+      const s = await getSession(session.code);
       if (!s) return;
       const v = s.voting || {};
       const cur = v[myKey] || {};
       if (cur.finishedAt) return; // round resolved by host tick
       const curTaps = { ...(cur.taps || {}) };
       curTaps[myId] = Math.max(curTaps[myId] || 0, t);
-      await setSession({ ...s, voting: { ...v, [myKey]: { ...cur, taps: curTaps } } });
+      await setSession(session.code, { ...s, voting: { ...v, [myKey]: { ...cur, taps: curTaps } } });
       lastPushed.current = t;
     }, 250);
     return () => clearInterval(interval);
   }, [finished, myKey, myId]);
 
-  const tap = () => { if (finished) return; setLocalTaps(t => t + 1); };
+  const tap = () => { if (!canTap) return; setLocalTaps(t => t + 1); };
   const myDisplay = Math.max(myTaps, localTaps);
 
   return (
@@ -1615,12 +1818,33 @@ function ClickingContestGame({ session, myId, myGroup, color, header }) {
       <div style={{ fontSize: 13, color: 'rgba(255,255,254,0.5)', textAlign: 'center' }}>
         Najviše klikova u minuti pobjeđuje
       </div>
-      {!finished ? (
+      {inCountdown && !finished ? (
+        <div style={{
+          flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(255,255,254,0.04)', border: `2px solid ${color.bg}40`,
+          borderRadius: 24,
+        }}>
+          <div className="pu-display" style={{
+            fontSize: 140, color: '#FF8906', fontWeight: 800, lineHeight: 1,
+          }}>
+            {countdownSec > 0 ? countdownSec : 'KRENI!'}
+          </div>
+        </div>
+      ) : !finished && canTap ? (
         <button onClick={tap} onTouchStart={(e) => { e.preventDefault(); tap(); }} style={{
           flex: 1, background: color.bg, color: color.text,
           border: 'none', borderRadius: 24, fontSize: 40, fontWeight: 800, fontFamily: 'Fraunces, serif',
           cursor: 'pointer', userSelect: 'none', touchAction: 'manipulation',
         }}>KLIK!</button>
+      ) : !finished && timeExpired ? (
+        <div style={{
+          flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(255,255,254,0.04)', borderRadius: 24,
+          fontSize: 22, fontFamily: 'Fraunces, serif', fontWeight: 800,
+          color: 'rgba(255,255,254,0.6)',
+        }}>
+          Vrijeme isteklo — čekamo rezultate…
+        </div>
       ) : (
         <div style={{
           flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -1673,7 +1897,7 @@ function MiniQuizGame({ session, myId, myGroup, color, header, activity }) {
 
     setFeedback(isCorrect ? 'correct' : 'wrong');
 
-    const s = await getSession();
+    const s = await getSession(session.code);
     if (!s) return;
     const v = s.voting || {};
     const cur = v[myKey] || {};
@@ -1704,7 +1928,7 @@ function MiniQuizGame({ session, myId, myGroup, color, header, activity }) {
       updates = { ...updates, winnerId: winnerId || 'tie', finishedAt: Date.now() };
     }
 
-    await setSession({ ...s, voting: { ...v, [myKey]: updates } });
+    await setSession(session.code, { ...s, voting: { ...v, [myKey]: updates } });
 
     // Brief delay so user sees feedback before next question
     setTimeout(() => setFeedback(null), 600);
@@ -1805,7 +2029,7 @@ function VotingScreen({ session, myId, myGroup }) {
 
   const vote = async (choice) => {
     if (myThumb) return;
-    const s = await getSession();
+    const s = await getSession(session.code);
     if (!s) return;
     const v = s.voting || {};
     const cur = v[myKey] || {};
@@ -1814,7 +2038,7 @@ function VotingScreen({ session, myId, myGroup }) {
     if (myGroup.every(id => newThumbs[id])) {
       updates = { ...updates, finishedAt: Date.now() };
     }
-    await setSession({ ...s, voting: { ...v, [myKey]: updates } });
+    await setSession(session.code, { ...s, voting: { ...v, [myKey]: updates } });
   };
 
   return (
@@ -1913,15 +2137,15 @@ function ParticipantFinalScreen({ session, myId }) {
 // ROOT
 // ============================================================
 export default function App() {
-  const [mode, setMode] = useState(() => {
-    const h = window.location.hash.replace('#', '');
-    return ['host', 'join'].includes(h) ? h : null;
-  });
+  // Hash patterns: #host, #host=1234, #join, #join=1234
+  const parseMode = (h) => {
+    if (h.startsWith('host')) return 'host';
+    if (h.startsWith('join')) return 'join';
+    return null;
+  };
+  const [mode, setMode] = useState(() => parseMode(window.location.hash.replace('#', '')));
   useEffect(() => {
-    const onHash = () => {
-      const h = window.location.hash.replace('#', '');
-      setMode(['host', 'join'].includes(h) ? h : null);
-    };
+    const onHash = () => setMode(parseMode(window.location.hash.replace('#', '')));
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
