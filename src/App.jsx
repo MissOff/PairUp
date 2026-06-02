@@ -796,6 +796,13 @@ function HostDashboard({ onBack }) {
   const beginActivity = async (sFromCaller) => {
     const s = sFromCaller || await getSession(code);
     if (!s) return;
+    // Defensive: if state is incomplete (no currentActivity or groups), don't start a timer
+    // on stale data. Re-enter pairing for the current round instead.
+    if (!s.currentActivity || !s.groups || s.groups.length === 0) {
+      console.warn('beginActivity called with missing state — restarting pairing for round', s.round);
+      await beginPairing(s);
+      return;
+    }
     const cfg = getRoundConfig(s, s.round);
     await setSession(code, {
       ...s,
@@ -837,21 +844,28 @@ function HostDashboard({ onBack }) {
     });
   };
 
-  // Called by tick loop when 'between' phase ends — go to next round or finish
+  // Called by tick loop when 'between' phase ends — go to next round or finish.
+  // Must mirror startRound: triad-announce (if applicable) → pairing → category-announce → activity.
+  // (Previously this jumped straight to category-announce, which skipped pairing and reused
+  // stale voting state, causing rounds to auto-fire in seconds.)
   const advanceToNextRound = async (sFromCaller) => {
     const s = sFromCaller || await getSession(code);
     if (!s) return;
     if (s.round >= TOTAL_ROUNDS) {
       await finishGame(s);
-    } else {
-      // Auto-advance straight into the next round (category-announce)
-      const targetRound = s.round + 1;
+      return;
+    }
+    const targetRound = s.round + 1;
+    if (isTriadRound(s, targetRound)) {
       await setSession(code, {
         ...s,
-        phase: 'category-announce',
+        phase: 'triad-announce',
         round: targetRound,
-        categoryAnnounceDeadline: Date.now() + CATEGORY_ANNOUNCE_MS,
+        triadAnnounceDeadline: Date.now() + TRIAD_ANNOUNCE_MS,
       });
+    } else {
+      // beginPairing rebuilds groups/colors/voting/currentActivity for the new round
+      await beginPairing({ ...s, round: targetRound });
     }
   };
 
