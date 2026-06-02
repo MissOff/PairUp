@@ -109,14 +109,28 @@ const TOTAL_ROUNDS = 10;
 const PAIRING_MS  = 60_000;   // 60s to find your group
 const PAIRING_EXT_MS = 10_000; // extra 10s if not everyone found by first deadline
 const VOTING_MS   = 15_000;   // 15s to vote thumbs
-const TRIAD_ANNOUNCE_MS = 5_000;
-const CATEGORY_ANNOUNCE_MS = 3_000;
-const BETWEEN_MS  = 3_000;    // brief pause between rounds (no points reveal)
+const TRIAD_ANNOUNCE_MS = 3_000;
+const CATEGORY_ANNOUNCE_MS = 2_500;
+const BETWEEN_MS  = 1_500;    // brief pause between rounds (no points reveal)
 const CLICKING_COUNTDOWN_MS = 3_000; // 3-2-1 before clicking game starts
 
 function getCategoryForRound(session, round) {
   const order = session?.categoryOrder || ['get-to-know','get-to-know','get-to-know','get-to-know','riddles','riddles','riddles','mini-games','mini-games','mini-games'];
   return order[round - 1] || 'get-to-know';
+}
+
+const PHASE_LABELS_HR = {
+  'lobby': 'ČEKAONICA',
+  'category-announce': 'NAJAVA',
+  'triad-announce': 'NAJAVA TRIJADE',
+  'pairing': 'UPARIVANJE',
+  'activity': 'AKTIVNOST',
+  'voting': 'GLASANJE',
+  'between': 'PAUZA',
+  'finished': 'KRAJ',
+};
+function phaseLabelHr(phase) {
+  return PHASE_LABELS_HR[phase] || (phase || '').toUpperCase();
 }
 
 function getRoundConfig(session, round) {
@@ -293,8 +307,11 @@ const baseStyles = `
   .pu-spin { animation: pu-spin 1s linear infinite; }
   @keyframes pu-flash { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
   .pu-flash { animation: pu-flash 1s ease-in-out infinite; }
-  @keyframes pu-blink { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(0.55); } }
-  .pu-blink { animation: pu-blink 0.6s ease-in-out infinite; }
+  @keyframes pu-blink-pulse {
+    0%, 100% { box-shadow: inset 0 0 0 0 rgba(242,95,76,0); }
+    50% { box-shadow: inset 0 0 0 14px rgba(242,95,76,0.75); }
+  }
+  .pu-blink { animation: pu-blink-pulse 0.6s ease-in-out infinite; }
 `;
 
 // ============================================================
@@ -374,13 +391,13 @@ function JoinCard({ code }) {
       background: 'linear-gradient(135deg, #FF8906 0%, #F25F4C 100%)',
       borderRadius: 20, padding: '24px 20px', color: '#0F0E17', textAlign: 'center',
     }}>
-      <div style={{ fontSize: 11, letterSpacing: '0.3em', opacity: 0.7, marginBottom: 8 }}>JOIN CODE</div>
+      <div style={{ fontSize: 11, letterSpacing: '0.3em', opacity: 0.7, marginBottom: 8 }}>KOD ZA PRIDRUŽIVANJE</div>
       <div className="pu-display" style={{ fontSize: 72, letterSpacing: '0.05em', lineHeight: 1 }}>{code}</div>
       <div style={{ marginTop: 16, background: '#FFFFFE', borderRadius: 14, padding: 12, display: 'inline-flex' }}>
         <QRCode value={joinUrl} size={140} />
       </div>
       <div style={{ fontSize: 12, opacity: 0.85, marginTop: 12, wordBreak: 'break-all', lineHeight: 1.4 }}>
-        Scan or visit<br /><strong style={{ fontWeight: 700 }}>{joinUrl}</strong>
+        Skeniraj ili posjeti<br /><strong style={{ fontWeight: 700 }}>{joinUrl}</strong>
       </div>
     </div>
   );
@@ -404,7 +421,7 @@ function CopyLinkRow({ code }) {
       background: 'rgba(255,255,254,0.06)', color: copied ? '#7CB342' : 'rgba(255,255,254,0.85)',
       fontSize: 14, padding: '12px 16px', borderRadius: 12, border: '1px solid rgba(255,255,254,0.1)',
     }}>
-      {copied ? '✓ Link copied' : '⎘ Copy join link'}
+      {copied ? '✓ Link kopiran' : '⎘ Kopiraj link'}
     </button>
   );
 }
@@ -430,17 +447,17 @@ function Landing({ onChoose }) {
           Pair<br/><span style={{ color: '#FF8906', fontStyle: 'italic' }}>Up.</span>
         </h1>
         <p style={{ color: 'rgba(255,255,254,0.6)', fontSize: 15, lineHeight: 1.6, maxWidth: 280, margin: '0 auto' }}>
-          Meet strangers. Find your color. Earn points. Have fun.
+          Upoznaj nove ljude. Pronađi svoju boju. Skupljaj bodove. Zabavi se.
         </p>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, width: '100%', maxWidth: 320 }}>
         <button className="pu-btn" onClick={() => onChoose('join')} style={{
           background: '#FF8906', color: '#0F0E17', fontSize: 17, padding: '18px 24px', borderRadius: 14,
-        }}>I'm a participant →</button>
+        }}>Sudionik sam →</button>
         <button className="pu-btn" onClick={() => onChoose('host')} style={{
           background: 'transparent', color: 'rgba(255,255,254,0.8)', fontSize: 15, padding: '14px 24px',
           borderRadius: 14, border: '2px solid rgba(255,255,254,0.15)',
-        }}>I'm hosting this event</button>
+        }}>Ja sam domaćin</button>
       </div>
     </div>
   );
@@ -463,21 +480,27 @@ function buildActivityPlan() {
 
 function getRoundActivity(session, round) {
   const cfg = getRoundConfig(session, round);
+  const category = cfg.category;
   const plan = session.activityPlan || {};
-  if (cfg.category === 'get-to-know') {
-    const slot = round - 1; // 0..3
+  // With randomized category order, we can't use `round - 1` as the slot anymore.
+  // Slot = how many times this category has already appeared in rounds 1..round-1.
+  const order = session.categoryOrder || [];
+  let slot = 0;
+  for (let i = 0; i < round - 1; i++) {
+    if (order[i] === category) slot++;
+  }
+
+  if (category === 'get-to-know') {
     const idx = (plan['get-to-know'] || [])[slot] ?? 0;
     return { kind: 'thumbs', category: 'get-to-know', prompt: GET_TO_KNOW[idx] };
   }
-  if (cfg.category === 'riddles') {
-    const slot = round - 5; // 0..2
+  if (category === 'riddles') {
     const idx = (plan['riddles'] || [])[slot] ?? 0;
     const r = RIDDLES[idx];
     if (r.type === 'equation') return { kind: 'equation', category: 'riddles', prompt: r.prompt, answers: r.answers };
     return { kind: 'thumbs', category: 'riddles', prompt: r.prompt };
   }
   // mini-games
-  const slot = round - 8; // 0..2
   const idx = (plan['mini-games'] || [])[slot] ?? 0;
   const g = MINI_GAMES[idx];
   if (g.id === 'mini-quiz') {
@@ -506,41 +529,52 @@ function detectReturning(group, pastGroups) {
 }
 
 function scoreRound(session, round) {
-  // Returns { pointsAwarded: { [id]: number }, finishOrder: [groupKey...] }
+  // Returns { pointsAwarded: { [id]: number }, fastest3: [groupKey...] }
   const groups = session.groups || [];
-  const colors = session.colors || {};
   const activity = session.currentActivity || {};
   const voting = session.voting || {};
-  const finishTimes = []; // [{ key, t }]
 
-  groups.forEach(g => {
-    const key = groupKey(g);
-    const v = voting[key];
-    if (v?.finishedAt) finishTimes.push({ key, t: v.finishedAt });
-  });
-  finishTimes.sort((a, b) => a.t - b.t);
-  const fastest3 = new Set(finishTimes.slice(0, 3).map(x => x.key));
+  // Speed bonus: applies only to non-thumbs activities (equations + mini-games).
+  // Thumbs voting isn't a speed contest; capping at 1 pt as requested.
+  let fastest3 = new Set();
+  if (activity.kind !== 'thumbs') {
+    const finishTimes = [];
+    groups.forEach(g => {
+      if (g.length < 2) return;
+      const key = groupKey(g);
+      const v = voting[key];
+      if (v?.finishedAt) finishTimes.push({ key, t: v.finishedAt });
+    });
+    finishTimes.sort((a, b) => a.t - b.t);
+    fastest3 = new Set(finishTimes.slice(0, 3).map(x => x.key));
+  }
 
   const points = {};
   groups.forEach(g => {
     if (g.length < 2) return; // solo sit-outs
     const key = groupKey(g);
     const v = voting[key] || {};
+
+    if (activity.kind === 'thumbs') {
+      // Strict: all-up = 1 pt each, anything else = 0. No speed multiplier.
+      const ups = g.filter(id => v.thumbs && v.thumbs[id] === 'up').length;
+      const base = (ups === g.length) ? 1 : 0;
+      g.forEach(id => { points[id] = (points[id] || 0) + base; });
+      return;
+    }
+
     const mult = fastest3.has(key) ? 2 : 1;
 
-    let basePerPerson = 0;
-    if (activity.kind === 'thumbs') {
-      const ups = g.filter(id => v.thumbs && v.thumbs[id] === 'up').length;
-      // New rule: only if EVERYONE in the group gave thumbs up = 1 pt each. Otherwise 0.
-      basePerPerson = (ups === g.length) ? 1 : 0;
-    } else if (activity.kind === 'equation') {
-      basePerPerson = v.correct ? 1 : 0;
-    } else if (activity.kind === 'mini-game') {
-      // Determine winner. Falls back to computing from raw data if no winnerId set
-      // (e.g., timer expired before resolution).
+    if (activity.kind === 'equation') {
+      const base = v.correct ? 1 : 0;
+      g.forEach(id => { points[id] = (points[id] || 0) + base * mult; });
+      return;
+    }
+
+    if (activity.kind === 'mini-game') {
+      // Determine winner (fall back to computing from raw data if timer-expired)
       let winnerId = v.winnerId;
       if (!winnerId && activity.miniGame === 'clicking') {
-        // Clicking contest: most clicks wins. Tie → no winner.
         const taps = v.taps || {};
         const sorted = [...g].sort((a, b) => (taps[b] || 0) - (taps[a] || 0));
         if (sorted.length >= 2 && (taps[sorted[0]] || 0) > (taps[sorted[1]] || 0)) {
@@ -548,7 +582,6 @@ function scoreRound(session, round) {
         }
       }
       if (!winnerId && activity.miniGame === 'rps') {
-        // RPS: whoever has more sub-round wins (tie → no winner)
         const rounds = v.rpsRounds || [];
         const scores = {};
         rounds.forEach(r => { if (r.winner) scores[r.winner] = (scores[r.winner] || 0) + 1; });
@@ -558,7 +591,6 @@ function scoreRound(session, round) {
         }
       }
       if (!winnerId && activity.miniGame === 'mini-quiz') {
-        // Mini quiz: most correct answers wins; tiebreak = fastest total time
         const quiz = v.quiz || {};
         const stats = g.map(id => {
           const qa = quiz[id] || {};
@@ -572,15 +604,12 @@ function scoreRound(session, round) {
           winnerId = stats[0].id;
         }
       }
+      // Winner gets 1 pt × mult (so 2 if fastest 3, else 1). Others get 0 for this round.
       if (winnerId && winnerId !== 'tie' && g.includes(winnerId)) {
         points[winnerId] = (points[winnerId] || 0) + (1 * mult);
       }
       g.forEach(id => { if (points[id] === undefined) points[id] = 0; });
-      return; // skip the per-person assignment below
     }
-    g.forEach(id => {
-      points[id] = (points[id] || 0) + basePerPerson * mult;
-    });
   });
 
   return { pointsAwarded: points, fastest3: [...fastest3] };
@@ -616,15 +645,15 @@ function HostDashboard({ onBack }) {
       const now = Date.now();
       try {
         tickBusy.current = true;
-        // category-announce timeout → triad-announce OR pairing
+        // category-announce timeout → activity (NEW: this comes after pairing now)
         if (s.phase === 'category-announce' && s.categoryAnnounceDeadline && now >= s.categoryAnnounceDeadline) {
-          await afterCategoryAnnounce(s);
+          await beginActivity(s);
         }
         // triad-announce timeout → pairing
         else if (s.phase === 'triad-announce' && s.triadAnnounceDeadline && now >= s.triadAnnounceDeadline) {
           await beginPairing(s);
         }
-        // pairing: handle extension + final timeout
+        // pairing: handle extension + final timeout, then → category-announce
         else if (s.phase === 'pairing' && s.pairingDeadline) {
           const groups = s.groups || [];
           const confirmed = s.foundConfirmed || {};
@@ -633,14 +662,14 @@ function HostDashboard({ onBack }) {
             return g.every(id => c[id]);
           });
           if (allFound) {
-            await beginActivity(s);
+            await beginCategoryAnnounce(s);
           } else if (now >= s.pairingDeadline) {
             if (!s.pairingExtended) {
               // First deadline reached, not everyone found — extend by 10s and signal blink
               await setSession(code, { ...s, pairingExtended: true, pairingDeadline: now + PAIRING_EXT_MS });
             } else {
-              // Extension expired — force advance
-              await beginActivity(s);
+              // Extension expired — force advance through category-announce to activity
+              await beginCategoryAnnounce(s);
             }
           }
         }
@@ -673,7 +702,7 @@ function HostDashboard({ onBack }) {
         }
       } catch (e) { console.error('Tick error', e); }
       finally { tickBusy.current = false; }
-    }, 1000);
+    }, 500);
     return () => clearInterval(id);
   }, [code]);
 
@@ -707,7 +736,7 @@ function HostDashboard({ onBack }) {
     const s = sFromCaller || await getSession(code);
     if (!s) return;
     const ids = Object.keys(s.participants || {});
-    if (ids.length < 2) { alert('Need at least 2 participants.'); return; }
+    if (ids.length < 2) { alert('Treba najmanje 2 sudionika.'); return; }
     // By now `s.round` has been set by startRound (via category-announce phase). Just use it.
     const targetRound = s.round;
     const groups = makeGroups(ids, isTriadRound(s, targetRound));
@@ -736,27 +765,32 @@ function HostDashboard({ onBack }) {
     const s = await getSession(code);
     if (!s) return;
     const ids = Object.keys(s.participants || {});
-    if (ids.length < 2) { alert('Need at least 2 participants.'); return; }
+    if (ids.length < 2) { alert('Treba najmanje 2 sudionika.'); return; }
     const targetRound = (s.phase === 'lobby' || !s.round) ? 1 : s.round + 1;
     if (targetRound > TOTAL_ROUNDS) { await finishGame(s); return; }
-    // Always show category-announce first (before triad and pairing)
+    // Triad heads-up (if applicable) → pairing → category-announce → activity
+    if (isTriadRound(s, targetRound)) {
+      await setSession(code, {
+        ...s,
+        phase: 'triad-announce',
+        round: targetRound,
+        triadAnnounceDeadline: Date.now() + TRIAD_ANNOUNCE_MS,
+      });
+    } else {
+      await beginPairing({ ...s, round: targetRound });
+    }
+  };
+
+  // Called when pairing is done (everyone confirmed or extension expired).
+  // Shows the category announce screen for a short pause, then activity begins.
+  const beginCategoryAnnounce = async (sFromCaller) => {
+    const s = sFromCaller || await getSession(code);
+    if (!s) return;
     await setSession(code, {
       ...s,
       phase: 'category-announce',
-      round: targetRound,
       categoryAnnounceDeadline: Date.now() + CATEGORY_ANNOUNCE_MS,
     });
-  };
-
-  // After category-announce expires, either show triad-announce or jump to pairing
-  const afterCategoryAnnounce = async (sFromCaller) => {
-    const s = sFromCaller || await getSession(code);
-    if (!s) return;
-    if (isTriadRound(s, s.round)) {
-      await setSession(code, { ...s, phase: 'triad-announce', triadAnnounceDeadline: Date.now() + TRIAD_ANNOUNCE_MS });
-    } else {
-      await beginPairing(s);
-    }
   };
 
   const beginActivity = async (sFromCaller) => {
@@ -844,7 +878,7 @@ function HostDashboard({ onBack }) {
   };
 
   const endSession = async () => {
-    if (!window.confirm('End the session? All participants will be disconnected.')) return;
+    if (!window.confirm('Završiti sesiju? Svi sudionici će biti odspojeni.')) return;
     await deleteSession(code);
     setCode(null);
     setSessionState(null);
@@ -857,19 +891,19 @@ function HostDashboard({ onBack }) {
   if (!session) {
     return (
       <div className="pu-shell pu-fade" style={{ justifyContent: 'center', gap: 24 }}>
-        <button onClick={onBack} className="pu-btn" style={{ alignSelf: 'flex-start', background: 'transparent', color: 'rgba(255,255,254,0.5)', fontSize: 14, padding: '8px 0' }}>← back</button>
+        <button onClick={onBack} className="pu-btn" style={{ alignSelf: 'flex-start', background: 'transparent', color: 'rgba(255,255,254,0.5)', fontSize: 14, padding: '8px 0' }}>← natrag</button>
         <div>
-          <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906', marginBottom: 12 }}>HOST</div>
+          <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906', marginBottom: 12 }}>DOMAĆIN</div>
           <h2 className="pu-display" style={{ fontSize: 42, margin: '0 0 16px' }}>
-            Start a<br/><em style={{ color: '#FF8906' }}>new session</em>
+            Pokreni<br/><em style={{ color: '#FF8906' }}>novu sesiju</em>
           </h2>
           <p style={{ color: 'rgba(255,255,254,0.6)', fontSize: 15, lineHeight: 1.6 }}>
-            10 rounds total: 4 conversations, 3 riddles & challenges, 3 mini games. Get the join code and let people in.
+            10 rundi: 4 razgovora, 3 zagonetke i izazova, 3 mini igre. Dobit ćeš kod i pusti ljude unutra.
           </p>
         </div>
         <button className="pu-btn" onClick={createSession} disabled={creating} style={{
           background: '#FF8906', color: '#0F0E17', fontSize: 17, padding: '18px 24px', borderRadius: 14,
-        }}>{creating ? 'Creating…' : 'Create session →'}</button>
+        }}>{creating ? 'Pokrećem…' : 'Pokreni sesiju →'}</button>
       </div>
     );
   }
@@ -889,15 +923,15 @@ function HostDashboard({ onBack }) {
     <div className="pu-shell pu-fade" style={{ gap: 18 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
-          <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906' }}>HOST DASHBOARD</div>
+          <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906' }}>UPRAVLJAČKA PLOČA</div>
           <div style={{ fontSize: 13, color: 'rgba(255,255,254,0.5)', marginTop: 2 }}>
-            {session.round > 0 ? `Round ${session.round} of ${TOTAL_ROUNDS} · ${cfg.label}` : 'Lobby'}
+            {session.round > 0 ? `Runda ${session.round} od ${TOTAL_ROUNDS} · ${cfg.label}` : 'Čekaonica'}
           </div>
         </div>
         <button onClick={endSession} className="pu-btn" style={{
           background: 'transparent', color: 'rgba(255,255,254,0.4)', fontSize: 12, padding: '6px 10px',
           border: '1px solid rgba(255,255,254,0.15)', borderRadius: 8,
-        }}>end session</button>
+        }}>završi sesiju</button>
       </div>
 
       {session.phase === 'lobby' && (
@@ -918,9 +952,9 @@ function HostDashboard({ onBack }) {
       <div style={{ background: 'rgba(255,255,254,0.04)', border: '1px solid rgba(255,255,254,0.08)', borderRadius: 16, padding: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <div style={{ fontSize: 11, letterSpacing: '0.2em', color: 'rgba(255,255,254,0.5)' }}>
-            PHASE · {session.phase.toUpperCase()}
+            FAZA · {phaseLabelHr(session.phase)}
           </div>
-          {session.phase === 'pairing' && <Countdown deadline={session.pairingDeadline} />}
+          {session.phase === 'pairing' && <Countdown key={session.pairingDeadline} deadline={session.pairingDeadline} />}
           {session.phase === 'activity' && <Countdown deadline={session.activityDeadline} />}
           {session.phase === 'voting' && <Countdown deadline={session.votingDeadline} />}
           {session.phase === 'triad-announce' && <Countdown deadline={session.triadAnnounceDeadline} urgentAt={3} />}
@@ -930,37 +964,37 @@ function HostDashboard({ onBack }) {
         {session.phase === 'lobby' && (
           <>
             <p style={{ fontSize: 14, color: 'rgba(255,255,254,0.7)', margin: '0 0 14px', lineHeight: 1.5 }}>
-              Waiting for participants. Start round 1 when you have at least 2.
+              Čekamo sudionike. Pokreni rundu 1 kad ih bude najmanje 2.
             </p>
             <button className="pu-btn" onClick={startRound} disabled={participantList.length < 2} style={{
               background: '#FF8906', color: '#0F0E17', fontSize: 15, padding: '14px 20px', borderRadius: 12, width: '100%',
-            }}>Start round 1 →</button>
+            }}>Pokreni rundu 1 →</button>
           </>
         )}
 
         {session.phase === 'between' && (
           <p style={{ fontSize: 14, color: 'rgba(255,255,254,0.7)', margin: 0 }}>
-            Round {session.round} scored. Auto-advancing…
+            Runda {session.round} završena. Krećemo dalje…
           </p>
         )}
 
         {session.phase === 'category-announce' && (
           <p style={{ fontSize: 14, color: 'rgba(255,255,254,0.7)', margin: 0 }}>
-            Announcing category — {CATEGORY_TITLES[getCategoryForRound(session, session.round)] || '?'}
+            Najavljujem kategoriju — {CATEGORY_TITLES[getCategoryForRound(session, session.round)] || '?'}
           </p>
         )}
 
         {session.phase === 'triad-announce' && (
           <p style={{ fontSize: 14, color: 'rgba(255,255,254,0.7)', margin: 0 }}>
-            Announcing triad round — participants will get groups of 3.
+            Najavljujem trijadu — sudionici dobivaju grupe od 3.
           </p>
         )}
 
         {(session.phase === 'pairing' || session.phase === 'activity' || session.phase === 'voting') && (
           <p style={{ fontSize: 14, color: 'rgba(255,255,254,0.7)', margin: 0, lineHeight: 1.5 }}>
-            {session.phase === 'pairing' && `Finding groups. ${confirmedCount}/${totalGroups} confirmed.${session.pairingExtended ? ' (extended +10s)' : ''}`}
-            {session.phase === 'activity' && `Activity in progress — ${cfg?.label}.`}
-            {session.phase === 'voting' && `Collecting thumbs.`}
+            {session.phase === 'pairing' && `Traženje parova. ${confirmedCount}/${totalGroups} potvrđeno.${session.pairingExtended ? ' (produženo +10s)' : ''}`}
+            {session.phase === 'activity' && `Aktivnost u tijeku — ${cfg?.label}.`}
+            {session.phase === 'voting' && `Skupljam glasove.`}
           </p>
         )}
 
@@ -977,9 +1011,9 @@ function HostDashboard({ onBack }) {
       {/* PARTICIPANT LIST */}
       {session.phase === 'lobby' && (
         <div>
-          <div style={{ fontSize: 11, letterSpacing: '0.2em', color: 'rgba(255,255,254,0.5)', marginBottom: 10 }}>PARTICIPANTS</div>
+          <div style={{ fontSize: 11, letterSpacing: '0.2em', color: 'rgba(255,255,254,0.5)', marginBottom: 10 }}>SUDIONICI</div>
           {participantList.length === 0 ? (
-            <div style={{ fontSize: 14, color: 'rgba(255,255,254,0.4)', fontStyle: 'italic', padding: '12px 0' }}>No one has joined yet…</div>
+            <div style={{ fontSize: 14, color: 'rgba(255,255,254,0.4)', fontStyle: 'italic', padding: '12px 0' }}>Još nitko nije ušao…</div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {participantList.map(([id, p]) => (
@@ -1007,7 +1041,7 @@ function MiniLeaderboard({ session }) {
   if (list.length === 0) return null;
   return (
     <div>
-      <div style={{ fontSize: 11, letterSpacing: '0.2em', color: 'rgba(255,255,254,0.5)', marginBottom: 10 }}>TOP 5</div>
+      <div style={{ fontSize: 11, letterSpacing: '0.2em', color: 'rgba(255,255,254,0.5)', marginBottom: 10 }}>NAJBOLJIH 5</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {list.map((p, i) => (
           <div key={p.id} style={{
@@ -1031,7 +1065,7 @@ function FinalLeaderboard({ session }) {
   const stats = session.stats || {};
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div style={{ fontSize: 14, color: 'rgba(255,255,254,0.7)' }}>Game over. Final standings:</div>
+      <div style={{ fontSize: 14, color: 'rgba(255,255,254,0.7)' }}>Kraj igre. Konačni poredak:</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {list.map((p, i) => (
           <div key={p.id} style={{
@@ -1403,15 +1437,29 @@ function PairingScreen({ session, myId, myGroup }) {
   // Blink during pairing extension if THIS group still has unconfirmed members
   const shouldBlink = !!session.pairingExtended && !allConfirmed;
 
-  // Partner profile hints (from hidden profile)
+  // Partner profile hints — show ONE fact only, formatted as a Croatian sentence.
+  // Rotate which fact is shown per round (and per partner index in triads),
+  // deterministically so all clients agree.
+  const FACT_CATEGORIES = ['season', 'snack', 'drink'];
+  const FACT_LABELS = {
+    season: 'Najdraže godišnje doba',
+    snack:  'Najdraži snack',
+    drink:  'Najdraže piće',
+  };
   const partners = myGroup.filter(id => id !== myId);
-  const partnerHints = partners.map(pid => {
+  const partnerHints = partners.map((pid, i) => {
     const p = session.participants?.[pid];
     if (!p) return null;
     const prof = p.profile || {};
-    const bits = [prof.season, prof.snack, prof.drink].filter(Boolean);
-    if (bits.length === 0) return null;
-    return { name: p.name || '?', bits };
+    // Pick fact: rotate by round + partner index, but skip any empty profile fields
+    const startIdx = ((session.round || 0) + i) % FACT_CATEGORIES.length;
+    let fact = null;
+    for (let off = 0; off < FACT_CATEGORIES.length; off++) {
+      const cat = FACT_CATEGORIES[(startIdx + off) % FACT_CATEGORIES.length];
+      if (prof[cat]) { fact = { cat, value: prof[cat] }; break; }
+    }
+    if (!fact) return null;
+    return { name: p.name || '?', label: FACT_LABELS[fact.cat], value: fact.value };
   }).filter(Boolean);
 
   const confirmFound = async () => {
@@ -1439,7 +1487,7 @@ function PairingScreen({ session, myId, myGroup }) {
           <div style={{ fontSize: 11, letterSpacing: '0.3em', opacity: 0.7 }}>TVOJA BOJA</div>
           {isReunion && <div style={{ fontSize: 12, marginTop: 4, fontStyle: 'italic', opacity: 0.85 }}>♻︎ Već ste se susreli!</div>}
         </div>
-        <Countdown deadline={session.pairingDeadline} />
+        <Countdown key={session.pairingDeadline} deadline={session.pairingDeadline} />
       </div>
       <div className="pu-display" style={{ fontSize: 96, margin: '8px 0 4px', lineHeight: 0.9 }}>
         {color.name}.
@@ -1460,10 +1508,10 @@ function PairingScreen({ session, myId, myGroup }) {
           {partnerHints.map((h, i) => (
             <div key={i} style={{
               padding: '12px 14px', borderRadius: 12, background: 'rgba(0,0,0,0.12)',
-              fontSize: 14, lineHeight: 1.4,
+              fontSize: 15, lineHeight: 1.4,
             }}>
-              <span style={{ opacity: 0.7 }}>Ova osoba voli</span>{' '}
-              <strong>{h.bits.join(', ')}</strong>
+              <span style={{ opacity: 0.75 }}>{h.label} tvog para je</span>{' '}
+              <strong>{h.value}</strong>
             </div>
           ))}
         </div>
@@ -1514,7 +1562,7 @@ function ActivityScreen({ session, myId, myGroup, myName }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <div style={{ width: 10, height: 10, borderRadius: '50%', background: color.bg }} />
         <div style={{ fontSize: 11, letterSpacing: '0.2em', color: 'rgba(255,255,254,0.5)' }}>
-          {color.name.toUpperCase()} · WITH {partners.toUpperCase()}
+          {color.name.toUpperCase()} · S {partners.toUpperCase()}
         </div>
       </div>
       <Countdown deadline={session.activityDeadline} urgentAt={Math.min(15, Math.floor(cfg.durationMs / 6000))} />
@@ -1525,12 +1573,12 @@ function ActivityScreen({ session, myId, myGroup, myName }) {
     return (
       <div className="pu-shell pu-fade" style={{ gap: 16 }}>
         {header}
-        <ActivityCard color={color} type={activity.category === 'get-to-know' ? 'QUESTION' : 'CHALLENGE'} prompt={activity.prompt} />
+        <ActivityCard color={color} type={activity.category === 'get-to-know' ? 'PITANJE' : 'IZAZOV'} prompt={activity.prompt} />
         <div style={{
           padding: '14px 16px', background: 'rgba(255,137,6,0.1)', border: '1px solid rgba(255,137,6,0.2)',
           borderRadius: 12, fontSize: 13, color: 'rgba(255,255,254,0.7)', textAlign: 'center',
         }}>
-          Talk it through together. You'll rate it after the timer.
+          Razgovarajte zajedno. Ocijenit ćete nakon isteka vremena.
         </div>
       </div>
     );
@@ -1593,22 +1641,22 @@ function EquationActivity({ session, myId, myGroup, color, header, activity }) {
   return (
     <div className="pu-shell pu-fade" style={{ gap: 16 }}>
       {header}
-      <ActivityCard color={color} type="RIDDLE" prompt={activity.prompt} />
+      <ActivityCard color={color} type="ZAGONETKA" prompt={activity.prompt} />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <input type="text" className="pu-input" value={answer}
-          onChange={e => setAnswer(e.target.value)} placeholder="Your answer"
+          onChange={e => setAnswer(e.target.value)} placeholder="Tvoj odgovor"
           disabled={submitted} onKeyDown={e => e.key === 'Enter' && submit()} />
         {!submitted ? (
           <button className="pu-btn" onClick={submit} disabled={!answer.trim()} style={{
             background: '#FF8906', color: '#0F0E17', fontSize: 16, padding: '14px 20px', borderRadius: 12,
-          }}>Submit answer</button>
+          }}>Pošalji odgovor</button>
         ) : (
           <div style={{
             padding: '14px 20px', borderRadius: 12, textAlign: 'center', fontWeight: 600,
             background: feedback === 'correct' ? 'rgba(124,179,66,0.15)' : 'rgba(242,95,76,0.15)',
             color: feedback === 'correct' ? '#7CB342' : '#F25F4C',
           }}>
-            {feedback === 'correct' ? '✓ Correct!' : '✗ Not quite. Wait for the round to finish.'}
+            {feedback === 'correct' ? '✓ Točno!' : '✗ Nije točno. Pričekaj kraj runde.'}
           </div>
         )}
       </div>
@@ -1671,7 +1719,7 @@ function RPSGame({ session, myId, myGroup, color, header }) {
         borderRadius: 20, padding: '24px', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 18,
       }}>
         <div style={{ alignSelf: 'flex-start', background: color.bg, color: color.text,
-          fontSize: 11, letterSpacing: '0.2em', padding: '6px 12px', borderRadius: 100, fontWeight: 700 }}>MINI GAME</div>
+          fontSize: 11, letterSpacing: '0.2em', padding: '6px 12px', borderRadius: 100, fontWeight: 700 }}>MINI IGRA</div>
         <div className="pu-display" style={{ fontSize: 32 }}>Kamen, Papir, Škare</div>
 
         {/* Scoreboard */}
@@ -1831,10 +1879,14 @@ function ClickingContestGame({ session, myId, myGroup, color, header }) {
           </div>
         </div>
       ) : !finished && canTap ? (
-        <button onClick={tap} onTouchStart={(e) => { e.preventDefault(); tap(); }} style={{
+        <button
+          onPointerDown={(e) => { e.preventDefault(); tap(); }}
+          onContextMenu={(e) => e.preventDefault()}
+          style={{
           flex: 1, background: color.bg, color: color.text,
           border: 'none', borderRadius: 24, fontSize: 40, fontWeight: 800, fontFamily: 'Fraunces, serif',
           cursor: 'pointer', userSelect: 'none', touchAction: 'manipulation',
+          WebkitTapHighlightColor: 'transparent', WebkitTouchCallout: 'none',
         }}>KLIK!</button>
       ) : !finished && timeExpired ? (
         <div style={{
@@ -1992,7 +2044,7 @@ function MiniQuizGame({ session, myId, myGroup, color, header, activity }) {
         borderRadius: 20, padding: '24px', flex: 1, display: 'flex', flexDirection: 'column', gap: 16,
       }}>
         <div style={{ alignSelf: 'flex-start', background: color.bg, color: color.text,
-          fontSize: 11, letterSpacing: '0.2em', padding: '6px 12px', borderRadius: 100, fontWeight: 700 }}>MINI QUIZ</div>
+          fontSize: 11, letterSpacing: '0.2em', padding: '6px 12px', borderRadius: 100, fontWeight: 700 }}>MINI KVIZ</div>
         <div className="pu-serif" style={{ fontSize: 22, lineHeight: 1.35, fontWeight: 600 }}>{currentQ.q}</div>
 
         <input type="text" className="pu-input" value={answer}
@@ -2044,15 +2096,15 @@ function VotingScreen({ session, myId, myGroup }) {
   return (
     <div className="pu-shell pu-fade" style={{ gap: 18 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ fontSize: 11, letterSpacing: '0.2em', color: 'rgba(255,255,254,0.5)' }}>RATE IT</div>
+        <div style={{ fontSize: 11, letterSpacing: '0.2em', color: 'rgba(255,255,254,0.5)' }}>OCJENA</div>
         <Countdown deadline={session.votingDeadline} urgentAt={5} />
       </div>
       <div>
         <h2 className="pu-display" style={{ fontSize: 36, margin: '0 0 8px' }}>
-          Was that<br/><em style={{ color: '#FF8906' }}>fun?</em>
+          Je li bilo <em style={{ color: '#FF8906' }}>zabavno?</em>
         </h2>
         <p style={{ color: 'rgba(255,255,254,0.6)', fontSize: 14, lineHeight: 1.5 }}>
-          Your group's combined thumbs decide your points. Both/all thumbs up = 2 pts each.
+          Ako svi u grupi daju palac gore, dobivate bod.
         </p>
       </div>
 
@@ -2064,7 +2116,7 @@ function VotingScreen({ session, myId, myGroup }) {
             flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6,
           }}>
             <div>👍</div>
-            <div style={{ fontSize: 14, fontWeight: 600 }}>Yep</div>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>Da</div>
           </button>
           <button className="pu-btn" onClick={() => vote('down')} style={{
             background: 'rgba(242,95,76,0.12)', color: '#F25F4C', fontSize: 64, padding: 0,
@@ -2072,14 +2124,14 @@ function VotingScreen({ session, myId, myGroup }) {
             flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6,
           }}>
             <div>👎</div>
-            <div style={{ fontSize: 14, fontWeight: 600 }}>Nope</div>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>Ne</div>
           </button>
         </div>
       ) : (
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 12 }}>
           <div style={{ fontSize: 80 }}>{myThumb === 'up' ? '👍' : '👎'}</div>
           <div style={{ color: 'rgba(255,255,254,0.6)', fontSize: 15 }}>
-            Submitted. Waiting for {myGroup.length === 3 ? 'the others' : 'partner'}…
+            Poslano. Čekamo {myGroup.length === 3 ? 'ostale' : 'para'}…
           </div>
         </div>
       )}
@@ -2100,17 +2152,17 @@ function ParticipantFinalScreen({ session, myId }) {
   return (
     <div className="pu-shell pu-fade" style={{ gap: 22 }}>
       <div style={{ textAlign: 'center', padding: '12px 0' }}>
-        <div style={{ fontSize: 12, letterSpacing: '0.3em', color: '#FF8906', marginBottom: 8 }}>GAME OVER</div>
+        <div style={{ fontSize: 12, letterSpacing: '0.3em', color: '#FF8906', marginBottom: 8 }}>KRAJ IGRE</div>
         <div className="pu-display" style={{ fontSize: 52, lineHeight: 1 }}>
           {myRank === 1 ? '🥇' : myRank === 2 ? '🥈' : myRank === 3 ? '🥉' : `#${myRank}`}
         </div>
         <div style={{ marginTop: 10, fontSize: 16, color: 'rgba(255,255,254,0.7)' }}>
-          You scored <strong className="pu-display" style={{ fontSize: 26, color: '#FF8906' }}>{myScore}</strong> points
+          Skupio/la si <strong className="pu-display" style={{ fontSize: 26, color: '#FF8906' }}>{myScore}</strong> bodova
         </div>
       </div>
 
       <div>
-        <div style={{ fontSize: 11, letterSpacing: '0.2em', color: 'rgba(255,255,254,0.5)', marginBottom: 10 }}>LEADERBOARD</div>
+        <div style={{ fontSize: 11, letterSpacing: '0.2em', color: 'rgba(255,255,254,0.5)', marginBottom: 10 }}>POREDAK</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {list.map((p, i) => (
             <div key={p.id} style={{
@@ -2121,7 +2173,7 @@ function ParticipantFinalScreen({ session, myId }) {
               <span style={{ width: 22, color: i < 3 ? '#FF8906' : 'rgba(255,255,254,0.5)', fontWeight: 700 }}>
                 {i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`}
               </span>
-              <span style={{ flex: 1 }}>{p.name}{p.id === myId ? ' (you)' : ''}</span>
+              <span style={{ flex: 1 }}>{p.name}{p.id === myId ? ' (ti)' : ''}</span>
               <span style={{ fontFamily: 'Fraunces, serif', fontWeight: 800, fontSize: 18 }}>{p.score}</span>
             </div>
           ))}
