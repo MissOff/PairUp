@@ -53,7 +53,7 @@ const RULEBOOK = [
   "Igra ima 10 rundi raspoređenih u 3 kategorije - Upoznaj svog para; Izazov ili zagonetka; Brza igra.",
   "Tvoj par mijenja se svaku rundu — pronađi osobu s istom bojom na ekranu.",
   "Svaka runda (i uparivanje) ima vremensko ograničenje. Budi brz!",
-  "U igri zagonetki, odgovaraš zajedno sa svojim parom - budite što brži!"
+  "U igri zagonetki, odgovaraš zajedno sa svojim parom - budite što brži!",
   "Bodovi se zbrajaju kroz cijelu igru — pobjednik se otkriva na kraju.",
   "Najvažnije — zabavi se i upoznaj nove ljude!",
 ];
