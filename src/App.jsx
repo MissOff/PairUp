@@ -106,13 +106,15 @@ const MINI_QUIZ_QUESTIONS = [
 // ---------- ROUND CONFIG ----------
 // 4 get-to-know (3min) + 3 riddles (2min) + 3 mini-games (1min) = 10 rounds
 const TOTAL_ROUNDS = 10;
-const PAIRING_MS  = 60_000;   // 60s to find your group
-const PAIRING_EXT_MS = 10_000; // extra 10s if not everyone found by first deadline
-const VOTING_MS   = 15_000;   // 15s to vote thumbs
+const PAIRING_MS  = 60_000;
+const PAIRING_EXT_MS = 10_000;
+const VOTING_MS   = 15_000;
 const TRIAD_ANNOUNCE_MS = 3_000;
 const CATEGORY_ANNOUNCE_MS = 2_500;
-const BETWEEN_MS  = 1_500;    // brief pause between rounds (no points reveal)
-const CLICKING_COUNTDOWN_MS = 3_000; // 3-2-1 before clicking game starts
+const BETWEEN_MS  = 1_500;
+const CLICKING_COUNTDOWN_MS = 3_000;
+const TIEBREAKER_ANNOUNCE_MS = 4_000;
+const TIEBREAKER_ACTIVE_MS = 15_000;
 
 function getCategoryForRound(session, round) {
   const order = session?.categoryOrder || ['get-to-know','get-to-know','get-to-know','get-to-know','riddles','riddles','riddles','mini-games','mini-games','mini-games'];
@@ -127,11 +129,26 @@ const PHASE_LABELS_HR = {
   'activity': 'AKTIVNOST',
   'voting': 'GLASANJE',
   'between': 'PAUZA',
+  'tiebreaker-announce': 'NAJAVA STANDOFFA',
+  'tiebreaker-active': 'STANDOFF',
   'finished': 'KRAJ',
 };
 function phaseLabelHr(phase) {
   return PHASE_LABELS_HR[phase] || (phase || '').toUpperCase();
 }
+
+// Leaderboard sort: by score desc, then by tiebreaker tap count desc, then alphabetical.
+function makeLeaderboardSorter(session) {
+  const tbTaps = (session && session.tiebreakerTaps) || {};
+  return (a, b) => {
+    if ((b.score || 0) !== (a.score || 0)) return (b.score || 0) - (a.score || 0);
+    const aT = tbTaps[a.id] || 0;
+    const bT = tbTaps[b.id] || 0;
+    if (bT !== aT) return bT - aT;
+    return (a.name || '').localeCompare(b.name || '');
+  };
+}
+
 
 function getRoundConfig(session, round) {
   const category = getCategoryForRound(session, round);
@@ -700,6 +717,14 @@ function HostDashboard({ onBack }) {
         else if (s.phase === 'between' && s.betweenDeadline && now >= s.betweenDeadline) {
           await advanceToNextRound(s);
         }
+        // tiebreaker-announce → tiebreaker-active
+        else if (s.phase === 'tiebreaker-announce' && s.tiebreakerAnnounceDeadline && now >= s.tiebreakerAnnounceDeadline) {
+          await beginTiebreaker(s);
+        }
+        // tiebreaker-active → finished (timer expired)
+        else if (s.phase === 'tiebreaker-active' && s.tiebreakerDeadline && now >= s.tiebreakerDeadline) {
+          await finalizeTiebreaker(s);
+        }
       } catch (e) { console.error('Tick error', e); }
       finally { tickBusy.current = false; }
     }, 500);
@@ -888,7 +913,53 @@ function HostDashboard({ onBack }) {
         stats[k][v] = (stats[k][v] || 0) + 1;
       });
     });
-    await setSession(code, { ...s, phase: 'finished', stats });
+
+    // Check for ties: anyone sharing a score with at least one other player joins the standoff
+    const participants = s.participants || {};
+    const scoreCounts = {};
+    Object.values(participants).forEach(p => {
+      const sc = p.score || 0;
+      scoreCounts[sc] = (scoreCounts[sc] || 0) + 1;
+    });
+    const tiedScores = new Set(
+      Object.entries(scoreCounts).filter(([_, n]) => n > 1).map(([s]) => Number(s))
+    );
+    const tiebreakerIds = Object.entries(participants)
+      .filter(([_, p]) => tiedScores.has(p.score || 0))
+      .map(([id]) => id);
+
+    if (tiebreakerIds.length >= 2) {
+      // Enter tiebreaker announce phase
+      await setSession(code, {
+        ...s,
+        phase: 'tiebreaker-announce',
+        stats,
+        tiebreakerIds,
+        tiebreakerTaps: {},
+        tiebreakerAnnounceDeadline: Date.now() + TIEBREAKER_ANNOUNCE_MS,
+      });
+    } else {
+      // No ties → straight to final leaderboard
+      await setSession(code, { ...s, phase: 'finished', stats });
+    }
+  };
+
+  // Transition from tiebreaker-announce → tiebreaker-active (start clicking)
+  const beginTiebreaker = async (sFromCaller) => {
+    const s = sFromCaller || await getSession(code);
+    if (!s) return;
+    await setSession(code, {
+      ...s,
+      phase: 'tiebreaker-active',
+      tiebreakerDeadline: Date.now() + TIEBREAKER_ACTIVE_MS,
+    });
+  };
+
+  // Tiebreaker over (timer expired) → reveal final leaderboard with tiebreaker-resolved order
+  const finalizeTiebreaker = async (sFromCaller) => {
+    const s = sFromCaller || await getSession(code);
+    if (!s) return;
+    await setSession(code, { ...s, phase: 'finished' });
   };
 
   const endSession = async () => {
@@ -973,6 +1044,8 @@ function HostDashboard({ onBack }) {
           {session.phase === 'voting' && <Countdown deadline={session.votingDeadline} />}
           {session.phase === 'triad-announce' && <Countdown deadline={session.triadAnnounceDeadline} urgentAt={3} />}
           {session.phase === 'category-announce' && <Countdown deadline={session.categoryAnnounceDeadline} urgentAt={2} />}
+          {session.phase === 'tiebreaker-announce' && <Countdown deadline={session.tiebreakerAnnounceDeadline} urgentAt={2} />}
+          {session.phase === 'tiebreaker-active' && <Countdown deadline={session.tiebreakerDeadline} urgentAt={5} />}
         </div>
 
         {session.phase === 'lobby' && (
@@ -1010,6 +1083,39 @@ function HostDashboard({ onBack }) {
             {session.phase === 'activity' && `Aktivnost u tijeku — ${cfg?.label}.`}
             {session.phase === 'voting' && `Skupljam glasove.`}
           </p>
+        )}
+
+        {(session.phase === 'tiebreaker-announce' || session.phase === 'tiebreaker-active') && (
+          <>
+            <p style={{ fontSize: 14, color: 'rgba(255,255,254,0.7)', margin: '0 0 12px', lineHeight: 1.5 }}>
+              {session.phase === 'tiebreaker-announce'
+                ? `Najavljujem standoff za ${(session.tiebreakerIds || []).length} sudionika.`
+                : `Standoff u tijeku — klikaju!`}
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {(session.tiebreakerIds || [])
+                .map(id => ({
+                  id,
+                  name: session.participants?.[id]?.name || '?',
+                  score: session.participants?.[id]?.score || 0,
+                  taps: (session.tiebreakerTaps || {})[id] || 0,
+                }))
+                .sort((a, b) => b.taps - a.taps || (a.name || '').localeCompare(b.name || ''))
+                .map((r, i) => (
+                  <div key={r.id} style={{
+                    padding: '8px 12px', borderRadius: 8,
+                    background: i === 0 && session.phase === 'tiebreaker-active' ? 'rgba(255,137,6,0.15)' : 'rgba(255,255,254,0.04)',
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13,
+                  }}>
+                    <span>
+                      <span style={{ color: i === 0 ? '#FF8906' : 'rgba(255,255,254,0.5)', fontWeight: 700, marginRight: 8 }}>{i + 1}.</span>
+                      {r.name} <span style={{ opacity: 0.5 }}>· {r.score}</span>
+                    </span>
+                    <span className="pu-display" style={{ fontSize: 18 }}>{r.taps}</span>
+                  </div>
+                ))}
+            </div>
+          </>
         )}
 
         {session.phase === 'finished' && (
@@ -1050,7 +1156,7 @@ function HostDashboard({ onBack }) {
 function MiniLeaderboard({ session }) {
   const list = Object.entries(session.participants || {})
     .map(([id, p]) => ({ id, name: p.name, score: p.score || 0 }))
-    .sort((a, b) => b.score - a.score)
+    .sort(makeLeaderboardSorter(session))
     .slice(0, 5);
   if (list.length === 0) return null;
   return (
@@ -1075,7 +1181,7 @@ function MiniLeaderboard({ session }) {
 function FinalLeaderboard({ session }) {
   const list = Object.entries(session.participants || {})
     .map(([id, p]) => ({ id, name: p.name, score: p.score || 0 }))
-    .sort((a, b) => b.score - a.score);
+    .sort(makeLeaderboardSorter(session));
   const stats = session.stats || {};
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -1412,6 +1518,10 @@ function GameScreen({ session, myId, myName }) {
         <div className="pu-display" style={{ fontSize: 40 }}>Sljedeća runda dolazi…</div>
       </div>
     );
+  }
+
+  if (session.phase === 'tiebreaker-announce' || session.phase === 'tiebreaker-active') {
+    return <TiebreakerScreen session={session} myId={myId} />;
   }
 
   if (session.phase === 'finished') {
@@ -2156,10 +2266,152 @@ function VotingScreen({ session, myId, myGroup }) {
 // ============================================================
 // PARTICIPANT FINAL SCREEN
 // ============================================================
+// ============================================================
+// TIEBREAKER — Solo clicking contest among everyone tied at any score
+// Contestants click as fast as they can; non-contestants spectate.
+// ============================================================
+function TiebreakerScreen({ session, myId }) {
+  const ids = session.tiebreakerIds || [];
+  const amContestant = ids.includes(myId);
+  const taps = session.tiebreakerTaps || {};
+  const isAnnounce = session.phase === 'tiebreaker-announce';
+  const isActive = session.phase === 'tiebreaker-active';
+  const participants = session.participants || {};
+
+  // Ranked contestants (live) by tap count desc
+  const ranked = ids
+    .map(id => ({ id, name: participants[id]?.name || '?', score: participants[id]?.score || 0, taps: taps[id] || 0 }))
+    .sort((a, b) => b.taps - a.taps || (a.name || '').localeCompare(b.name || ''));
+
+  // Local optimistic tap counter (for contestants)
+  const [localTaps, setLocalTaps] = useState(taps[myId] || 0);
+  const lastPushed = useRef(taps[myId] || 0);
+  const localTapsRef = useRef(localTaps);
+  localTapsRef.current = localTaps;
+  useEffect(() => { const v = taps[myId] || 0; if (v > localTaps) setLocalTaps(v); }, [taps, myId]);
+
+  useEffect(() => {
+    if (!amContestant || !isActive) return;
+    const interval = setInterval(async () => {
+      const t = localTapsRef.current;
+      if (t === lastPushed.current) return;
+      const s = await getSession(session.code);
+      if (!s || s.phase !== 'tiebreaker-active') return;
+      const cur = s.tiebreakerTaps || {};
+      const next = { ...cur, [myId]: Math.max(cur[myId] || 0, t) };
+      await setSession(session.code, { ...s, tiebreakerTaps: next });
+      lastPushed.current = t;
+    }, 250);
+    return () => clearInterval(interval);
+  }, [amContestant, isActive, myId, session.code]);
+
+  const tap = () => { if (isActive) setLocalTaps(t => t + 1); };
+
+  // ----- ANNOUNCE -----
+  if (isAnnounce) {
+    return (
+      <div className="pu-shell pu-fade" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center', gap: 20 }}>
+        <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906' }}>IZJEDNAČENO</div>
+        <div className="pu-display" style={{ fontSize: 56, lineHeight: 1, color: '#FF8906' }}>Tiebreaker!</div>
+        <p style={{ color: 'rgba(255,255,254,0.7)', fontSize: 15, lineHeight: 1.5, maxWidth: 320 }}>
+          {amContestant
+            ? 'Ti si u standoffu — spremi prst! Najviše klikova u 15s pobjeđuje.'
+            : 'Standoff za izjednačene sudionike. Pratiti uživo:'}
+        </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%', maxWidth: 320 }}>
+          {ranked.map(r => (
+            <div key={r.id} style={{
+              padding: '10px 14px', borderRadius: 10,
+              background: r.id === myId ? 'rgba(255,137,6,0.2)' : 'rgba(255,255,254,0.06)',
+              display: 'flex', justifyContent: 'space-between', fontSize: 14,
+            }}>
+              <span>{r.name}{r.id === myId ? ' (ti)' : ''}</span>
+              <span style={{ opacity: 0.6 }}>{r.score} bod{r.score === 1 ? '' : (r.score >= 2 && r.score <= 4 ? 'a' : 'ova')}</span>
+            </div>
+          ))}
+        </div>
+        <Countdown deadline={session.tiebreakerAnnounceDeadline} urgentAt={2} />
+      </div>
+    );
+  }
+
+  // ----- ACTIVE: CONTESTANT VIEW -----
+  if (amContestant) {
+    const myRank = ranked.findIndex(r => r.id === myId) + 1;
+    const myDisplay = Math.max(taps[myId] || 0, localTaps);
+    return (
+      <div className="pu-shell pu-fade" style={{ gap: 14 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ fontSize: 11, letterSpacing: '0.2em', color: '#FF8906' }}>TIEBREAKER · #{myRank}</div>
+          <Countdown deadline={session.tiebreakerDeadline} urgentAt={5} />
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'baseline', gap: 8 }}>
+          <div className="pu-display" style={{ fontSize: 64, color: '#FF8906' }}>{myDisplay}</div>
+          <div style={{ fontSize: 14, color: 'rgba(255,255,254,0.5)' }}>klikova</div>
+        </div>
+        <button
+          onPointerDown={(e) => { e.preventDefault(); tap(); }}
+          onContextMenu={(e) => e.preventDefault()}
+          style={{
+            flex: 1, background: '#FF8906', color: '#0F0E17',
+            border: 'none', borderRadius: 24, fontSize: 44, fontWeight: 800, fontFamily: 'Fraunces, serif',
+            cursor: 'pointer', userSelect: 'none', touchAction: 'manipulation',
+            WebkitTapHighlightColor: 'transparent', WebkitTouchCallout: 'none',
+          }}>KLIK!</button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ fontSize: 11, letterSpacing: '0.2em', color: 'rgba(255,255,254,0.5)', marginBottom: 4 }}>UŽIVO</div>
+          {ranked.map((r, i) => (
+            <div key={r.id} style={{
+              padding: '6px 12px', borderRadius: 8,
+              background: r.id === myId ? 'rgba(255,137,6,0.15)' : 'rgba(255,255,254,0.04)',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13,
+            }}>
+              <span><span style={{ color: i === 0 ? '#FF8906' : 'rgba(255,255,254,0.5)', fontWeight: 700, marginRight: 8 }}>{i + 1}.</span>{r.name}</span>
+              <span className="pu-display" style={{ fontSize: 18 }}>{r.taps}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // ----- ACTIVE: SPECTATOR VIEW -----
+  return (
+    <div className="pu-shell pu-fade" style={{ gap: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ fontSize: 11, letterSpacing: '0.2em', color: '#FF8906' }}>TIEBREAKER U TIJEKU</div>
+        <Countdown deadline={session.tiebreakerDeadline} urgentAt={5} />
+      </div>
+      <div className="pu-display" style={{ fontSize: 32, lineHeight: 1.1 }}>
+        Standoff <em style={{ color: '#FF8906' }}>uživo.</em>
+      </div>
+      <p style={{ color: 'rgba(255,255,254,0.6)', fontSize: 14, margin: 0 }}>
+        Tko najviše klikne u 15s, prolazi izjednačene iznad sebe.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
+        {ranked.map((r, i) => (
+          <div key={r.id} style={{
+            padding: '14px 16px', borderRadius: 12,
+            background: i === 0 ? 'rgba(255,137,6,0.15)' : 'rgba(255,255,254,0.05)',
+            border: i === 0 ? '1px solid rgba(255,137,6,0.4)' : '1px solid rgba(255,255,254,0.08)',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          }}>
+            <span style={{ fontSize: 16 }}>
+              <span style={{ color: i === 0 ? '#FF8906' : 'rgba(255,255,254,0.5)', fontWeight: 700, marginRight: 10 }}>{i + 1}.</span>
+              {r.name}
+            </span>
+            <span className="pu-display" style={{ fontSize: 28, color: i === 0 ? '#FF8906' : '#FFFFFE' }}>{r.taps}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ParticipantFinalScreen({ session, myId }) {
   const list = Object.entries(session.participants || {})
     .map(([id, p]) => ({ id, name: p.name, score: p.score || 0 }))
-    .sort((a, b) => b.score - a.score);
+    .sort(makeLeaderboardSorter(session));
   const myRank = list.findIndex(p => p.id === myId) + 1;
   const myScore = session.participants?.[myId]?.score || 0;
 
