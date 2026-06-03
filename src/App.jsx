@@ -50,9 +50,10 @@ const PROFILE_QUESTIONS = [
 // ---------- RULEBOOK (shown to participants on join, before profile) ----------
 // EDIT THESE 5 POINTS — these are placeholders.
 const RULEBOOK = [
-  "Igra ima 10 rundi raspoređenih u 3 kategorije.",
+  "Igra ima 10 rundi raspoređenih u 3 kategorije - Upoznaj svog para; Izazov ili zagonetka; Brza igra.",
   "Tvoj par mijenja se svaku rundu — pronađi osobu s istom bojom na ekranu.",
-  "Svaka runda ima vremensko ograničenje. Budi brz!",
+  "Svaka runda (i uparivanje) ima vremensko ograničenje. Budi brz!",
+  "U igri zagonetki, odgovaraš zajedno sa svojim parom - budite što brži!"
   "Bodovi se zbrajaju kroz cijelu igru — pobjednik se otkriva na kraju.",
   "Najvažnije — zabavi se i upoznaj nove ljude!",
 ];
@@ -2492,7 +2493,7 @@ function VotingScreen({ session, myId, myGroup }) {
           Je li bilo <em style={{ color: '#FF8906' }}>zabavno?</em>
         </h2>
         <p style={{ color: 'rgba(255,255,254,0.6)', fontSize: 14, lineHeight: 1.5 }}>
-          Ako svi u grupi daju palac gore, dobivate bod.
+          Ocijeni ovu aktivnost i svog para!
         </p>
       </div>
 
