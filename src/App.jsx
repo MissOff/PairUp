@@ -193,6 +193,76 @@ function shuffleCategoryOrder() {
   return result;
 }
 
+// ---------- PAIRING RESOLUTION ----------
+// At final pairing deadline, partial groups (some members didn't confirm) are resolved:
+// - Unconfirmed members sit out this round.
+// - Confirmed "orphans" (alone in their original group) are moved into the smallest
+//   intact group nearby (a pair becomes a triad), or paired together if no room,
+//   or finally sit out if there's no group to join.
+// Returns { newGroups, sitOuts, transferredIds, colors }.
+function resolveFailedPairings(s) {
+  const groups = s.groups || [];
+  const foundConfirmed = s.foundConfirmed || {};
+  const sitOuts = [];
+  const transferredIds = [];
+  const intactGroups = []; // confirmed members of each original group (≥ 2)
+  const orphans = [];      // confirmed-but-alone members
+
+  groups.forEach(g => {
+    const confirmed = foundConfirmed[groupKey(g)] || {};
+    const ok  = g.filter(id => confirmed[id]);
+    const bad = g.filter(id => !confirmed[id]);
+    sitOuts.push(...bad);
+    if (ok.length >= 2) intactGroups.push([...ok]);
+    else if (ok.length === 1) orphans.push(ok[0]);
+  });
+
+  // Distribute orphans
+  while (orphans.length > 0) {
+    // Look for smallest intact group with room (< 3 members so we don't make groups of 4)
+    let smallestIdx = -1;
+    let smallestSize = Infinity;
+    for (let i = 0; i < intactGroups.length; i++) {
+      if (intactGroups[i].length < 3 && intactGroups[i].length < smallestSize) {
+        smallestSize = intactGroups[i].length;
+        smallestIdx = i;
+      }
+    }
+    if (smallestIdx !== -1) {
+      const orphan = orphans.shift();
+      intactGroups[smallestIdx] = [...intactGroups[smallestIdx], orphan];
+      transferredIds.push(orphan);
+    } else {
+      // All intact groups are full (3 each) — pair remaining orphans with each other
+      if (orphans.length >= 2) {
+        const a = orphans.shift();
+        const b = orphans.shift();
+        intactGroups.push([a, b]);
+        transferredIds.push(a, b);
+      } else {
+        // Single lonely orphan, nowhere to put them
+        sitOuts.push(orphans.shift());
+      }
+    }
+  }
+
+  // Assign colors: each new group gets a single color. Prefer the color that the majority
+  // of original members had (so an "absorbed" pair keeps its color and only the new arrival changes).
+  const colors = {};
+  intactGroups.forEach((g, i) => {
+    const counts = {};
+    g.forEach(id => {
+      const c = s.colors?.[id];
+      if (c !== undefined) counts[c] = (counts[c] || 0) + 1;
+    });
+    const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    const chosen = sorted.length > 0 ? Number(sorted[0][0]) : (i % COLORS.length);
+    g.forEach(id => { colors[id] = chosen; });
+  });
+
+  return { newGroups: intactGroups, sitOuts, transferredIds, colors };
+}
+
 // ---------- FIREBASE HELPERS (multi-session: keyed by 4-digit code) ----------
 function sessionPath(code) { return `sessions/${code}`; }
 
@@ -685,8 +755,16 @@ function HostDashboard({ onBack }) {
               // First deadline reached, not everyone found — extend by 10s and signal blink
               await setSession(code, { ...s, pairingExtended: true, pairingDeadline: now + PAIRING_EXT_MS });
             } else {
-              // Extension expired — force advance through category-announce to activity
-              await beginCategoryAnnounce(s);
+              // Final deadline expired — resolve partial groups, then advance.
+              const { newGroups, transferredIds, colors } = resolveFailedPairings(s);
+              await setSession(code, {
+                ...s,
+                groups: newGroups,
+                colors,
+                transferredIds,
+                phase: 'category-announce',
+                categoryAnnounceDeadline: Date.now() + CATEGORY_ANNOUNCE_MS,
+              });
             }
           }
         }
@@ -782,6 +860,7 @@ function HostDashboard({ onBack }) {
       currentActivity: getRoundActivity(s, targetRound),
       pairingDeadline: Date.now() + PAIRING_MS,
       pairingExtended: false,
+      transferredIds: [],
       hasReunion,
     });
   };
@@ -970,6 +1049,31 @@ function HostDashboard({ onBack }) {
     window.location.hash = 'host';
   };
 
+  // ----- REJOIN ADMIN -----
+  const admitRejoin = async (id) => {
+    const s = await getSession(code);
+    if (!s) return;
+    const pending = { ...(s.pendingRejoins || {}) };
+    delete pending[id];
+    // If mid-round, remove the rejoiner from the current round's groups so they sit out
+    // this round; they'll be paired again at the next round's beginPairing.
+    let groups = s.groups;
+    if (s.phase !== 'lobby' && s.phase !== 'finished' && Array.isArray(groups)) {
+      groups = groups.map(g => Array.isArray(g) ? g.filter(pid => pid !== id) : g)
+                     .filter(g => Array.isArray(g) && g.length > 0);
+    }
+    await setSession(code, { ...s, pendingRejoins: pending, groups });
+  };
+  const denyRejoin = async (id) => {
+    const s = await getSession(code);
+    if (!s) return;
+    const pending = { ...(s.pendingRejoins || {}) };
+    delete pending[id];
+    const participants = { ...(s.participants || {}) };
+    delete participants[id];
+    await setSession(code, { ...s, pendingRejoins: pending, participants });
+  };
+
   // ----- RENDER -----
   if (loading) return <div className="pu-shell" style={{ justifyContent: 'center', alignItems: 'center' }}><Spinner /></div>;
 
@@ -1123,6 +1227,44 @@ function HostDashboard({ onBack }) {
         )}
       </div>
 
+      {/* PENDING REJOINS */}
+      {Object.keys(session.pendingRejoins || {}).length > 0 && (
+        <div style={{
+          background: 'rgba(255,137,6,0.08)',
+          border: '1px solid rgba(255,137,6,0.3)',
+          borderRadius: 16, padding: 14,
+        }}>
+          <div style={{ fontSize: 11, letterSpacing: '0.2em', color: '#FF8906', marginBottom: 10 }}>
+            ZAHTJEVI ZA POVRATAK
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {Object.entries(session.pendingRejoins || {}).map(([id, info]) => {
+              const p = session.participants?.[id];
+              if (!p) return null;
+              return (
+                <div key={id} style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  padding: '10px 12px', background: 'rgba(255,255,254,0.04)',
+                  borderRadius: 10,
+                }}>
+                  <span style={{ fontSize: 15 }}>{p.name}</span>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button className="pu-btn" onClick={() => admitRejoin(id)} style={{
+                      background: '#FF8906', color: '#0F0E17', fontSize: 12, padding: '7px 12px',
+                      borderRadius: 8, fontWeight: 700,
+                    }}>pusti</button>
+                    <button className="pu-btn" onClick={() => denyRejoin(id)} style={{
+                      background: 'transparent', color: 'rgba(255,255,254,0.5)', fontSize: 12, padding: '7px 12px',
+                      border: '1px solid rgba(255,255,254,0.15)', borderRadius: 8,
+                    }}>odbij</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* MINI LEADERBOARD */}
       {session.phase !== 'lobby' && session.phase !== 'finished' && participantList.length > 0 && (
         <MiniLeaderboard session={session} />
@@ -1265,9 +1407,24 @@ function ParticipantFlow({ onBack }) {
         return;
       }
       setSessionState(s);
+      // Rejoin transitions
+      if (step === 'rejoin-wait') {
+        const stillPending = !!(s.pendingRejoins && s.pendingRejoins[myId]);
+        const stillInGame = !!(s.participants && s.participants[myId]);
+        if (!stillInGame) {
+          // Host denied (removed from participants)
+          setError('Host te nije pustio natrag.');
+          setStep('enter');
+          setMyId(null);
+          setCodeConfirmed(false);
+        } else if (!stillPending) {
+          // Admitted — drop into the game
+          setStep('wait');
+        }
+      }
     });
     return unsub;
-  }, [myId, code]);
+  }, [myId, code, step]);
 
   // ----- ENTER CODE -----
   const submitCode = async () => {
@@ -1276,10 +1433,31 @@ function ParticipantFlow({ onBack }) {
     if (!/^\d{4}$/.test(trimmed)) { setError('Unesi 4-znamenkasti kod.'); return; }
     const s = await getSession(trimmed);
     if (!s) { setError('Nema aktivne sesije s tim kodom.'); return; }
-    if (s.phase !== 'lobby') { setError('Igra je već započela — pričekaj sljedeću.'); return; }
     setCode(trimmed);
     setCodeConfirmed(true);
-    setStep('rulebook');
+    if (s.phase === 'lobby') {
+      setStep('rulebook');
+    } else if (s.phase === 'finished') {
+      setError('Igra je završena.'); setCodeConfirmed(false);
+    } else {
+      // Mid-game: rejoin flow
+      setSessionState(s); // store snapshot for the picker
+      setStep('rejoin-pick');
+    }
+  };
+
+  // ----- REJOIN: pick your name from the existing participants -----
+  const requestRejoin = async (id) => {
+    setError('');
+    const s = await getSession(code);
+    if (!s) { setError('Sesija je završena.'); setStep('enter'); setCodeConfirmed(false); return; }
+    if (!s.participants?.[id]) { setError('Nema tog sudionika.'); return; }
+    const pending = { ...(s.pendingRejoins || {}), [id]: { requestedAt: Date.now() } };
+    const ok = await setSession(code, { ...s, pendingRejoins: pending });
+    if (!ok) { setError('Greška. Pokušaj ponovno.'); return; }
+    setMyId(id);
+    setName(s.participants[id].name || '');
+    setStep('rejoin-wait');
   };
 
   // ----- ACCEPT RULEBOOK -----
@@ -1397,6 +1575,56 @@ function ParticipantFlow({ onBack }) {
     );
   }
 
+  if (step === 'rejoin-pick') {
+    const list = Object.entries((session && session.participants) || {})
+      .map(([id, p]) => ({ id, name: p.name || '?' }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return (
+      <div className="pu-shell pu-fade" style={{ gap: 20 }}>
+        <button onClick={() => { setStep('enter'); setCodeConfirmed(false); setSessionState(null); }} className="pu-btn" style={{ alignSelf: 'flex-start', background: 'transparent', color: 'rgba(255,255,254,0.5)', fontSize: 14, padding: '8px 0' }}>← natrag</button>
+        <div>
+          <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906', marginBottom: 12 }}>POVRATAK</div>
+          <h2 className="pu-display" style={{ fontSize: 38, margin: '0 0 8px' }}>
+            Tko si <em style={{ color: '#FF8906' }}>ti?</em>
+          </h2>
+          <p style={{ color: 'rgba(255,255,254,0.6)', fontSize: 15, lineHeight: 1.5 }}>
+            Igra je već u tijeku. Odaberi svoje ime — host te mora pustiti natrag.
+          </p>
+        </div>
+        {error && <div style={{ color: '#F25F4C', fontSize: 14 }}>{error}</div>}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1, overflowY: 'auto' }}>
+          {list.length === 0 && (
+            <div style={{ fontSize: 14, color: 'rgba(255,255,254,0.4)', fontStyle: 'italic', padding: '12px 0' }}>
+              U sesiji još nema sudionika.
+            </div>
+          )}
+          {list.map(p => (
+            <button key={p.id} className="pu-btn" onClick={() => requestRejoin(p.id)} style={{
+              background: 'rgba(255,255,254,0.06)', color: '#FFFFFE',
+              border: '1px solid rgba(255,255,254,0.12)', borderRadius: 12,
+              padding: '14px 16px', fontSize: 16, textAlign: 'left',
+            }}>{p.name}</button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (step === 'rejoin-wait') {
+    return (
+      <div className="pu-shell pu-fade" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center', gap: 20 }}>
+        <Spinner />
+        <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906' }}>ČEKAONICA</div>
+        <h2 className="pu-display" style={{ fontSize: 36, margin: 0 }}>
+          Čekamo<br/>da te host <em style={{ color: '#FF8906' }}>pusti.</em>
+        </h2>
+        <p style={{ color: 'rgba(255,255,254,0.6)', fontSize: 14, maxWidth: 280 }}>
+          Pridružit ćeš se igri od sljedeće runde.
+        </p>
+      </div>
+    );
+  }
+
   // wait or game
   if (!session) {
     return <div className="pu-shell" style={{ justifyContent: 'center', alignItems: 'center' }}><Spinner /></div>;
@@ -1450,12 +1678,33 @@ function GameScreen({ session, myId, myName }) {
   if (session.phase === 'category-announce') {
     const cat = getCategoryForRound(session, session.round);
     const title = CATEGORY_TITLES[cat] || '';
+    const wasTransferred = (session.transferredIds || []).includes(myId);
+    const myColorIdx = (session.colors || {})[myId];
+    const myColor = myColorIdx !== undefined ? COLORS[myColorIdx] : null;
     return (
       <div className="pu-shell pu-fade" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center', gap: 24 }}>
         <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906' }}>RUNDA {session.round}</div>
         <div className="pu-display" style={{ fontSize: 56, lineHeight: 1.05, color: '#FF8906' }}>
           {title}
         </div>
+        {wasTransferred && myColor && (
+          <div style={{
+            padding: '14px 18px', borderRadius: 14,
+            background: 'rgba(255,137,6,0.12)', border: '1px solid rgba(255,137,6,0.35)',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, maxWidth: 320,
+          }}>
+            <div style={{ fontSize: 12, letterSpacing: '0.2em', color: '#FF8906', fontWeight: 700 }}>
+              PREMJESTILI SU TE
+            </div>
+            <div style={{ fontSize: 14, color: 'rgba(255,255,254,0.8)', lineHeight: 1.4 }}>
+              Tvoja nova boja je{' '}
+              <span style={{
+                display: 'inline-block', background: myColor.bg, color: myColor.text,
+                padding: '2px 10px', borderRadius: 6, fontWeight: 700,
+              }}>{myColor.name}</span>
+            </div>
+          </div>
+        )}
         <Countdown deadline={session.categoryAnnounceDeadline} urgentAt={2} />
       </div>
     );
@@ -1486,7 +1735,7 @@ function GameScreen({ session, myId, myName }) {
   }
 
   if (session.phase === 'pairing') {
-    if (!myGroup) return <div className="pu-shell" style={{ justifyContent: 'center', alignItems: 'center' }}><Spinner /></div>;
+    if (!myGroup) return <SitOutScreen />;
     if (myGroup.length === 1) {
       return (
         <div className="pu-shell pu-fade" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center', gap: 24 }}>
@@ -1745,21 +1994,29 @@ function ActivityCard({ color, type, prompt }) {
 function EquationActivity({ session, myId, myGroup, color, header, activity }) {
   const myKey = groupKey(myGroup);
   const myVote = (session.voting || {})[myKey] || {};
-  const [answer, setAnswer] = useState(myVote.answer || '');
-  const [feedback, setFeedback] = useState(myVote.finishedAt ? (myVote.correct ? 'correct' : 'wrong') : null);
-  const submitted = !!myVote.finishedAt;
+  const [answer, setAnswer] = useState('');
+  const [feedback, setFeedback] = useState(null); // 'wrong' temporarily; 'correct' is derived from group state
+  const submitted = !!myVote.finishedAt; // group is locked only when SOMEONE got it right
 
   const submit = async () => {
     if (submitted || !answer.trim()) return;
+    const isCorrect = checkAnswer(answer, activity.answers || []);
+    if (!isCorrect) {
+      // Wrong: flash feedback briefly, clear input, allow retry
+      setFeedback('wrong');
+      setAnswer('');
+      setTimeout(() => setFeedback(null), 1500);
+      return;
+    }
+    // Correct: lock the group's voting entry
     const s = await getSession(session.code);
     if (!s) return;
-    const correct = checkAnswer(answer, activity.answers || []);
     const voting = s.voting || {};
+    if (voting[myKey]?.finishedAt) return; // race: another member just finished it
     await setSession(session.code, {
       ...s,
-      voting: { ...voting, [myKey]: { ...(voting[myKey] || {}), answer, correct, finishedAt: Date.now() } },
+      voting: { ...voting, [myKey]: { ...(voting[myKey] || {}), answer, correct: true, finishedAt: Date.now() } },
     });
-    setFeedback(correct ? 'correct' : 'wrong');
   };
 
   return (
@@ -1769,7 +2026,7 @@ function EquationActivity({ session, myId, myGroup, color, header, activity }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <input type="text" className="pu-input" value={answer}
           onChange={e => setAnswer(e.target.value)} placeholder="Tvoj odgovor"
-          disabled={submitted} onKeyDown={e => e.key === 'Enter' && submit()} />
+          disabled={submitted} onKeyDown={e => e.key === 'Enter' && submit()} autoFocus />
         {!submitted ? (
           <button className="pu-btn" onClick={submit} disabled={!answer.trim()} style={{
             background: '#FF8906', color: '#0F0E17', fontSize: 16, padding: '14px 20px', borderRadius: 12,
@@ -1777,10 +2034,17 @@ function EquationActivity({ session, myId, myGroup, color, header, activity }) {
         ) : (
           <div style={{
             padding: '14px 20px', borderRadius: 12, textAlign: 'center', fontWeight: 600,
-            background: feedback === 'correct' ? 'rgba(124,179,66,0.15)' : 'rgba(242,95,76,0.15)',
-            color: feedback === 'correct' ? '#7CB342' : '#F25F4C',
+            background: 'rgba(124,179,66,0.15)', color: '#7CB342',
           }}>
-            {feedback === 'correct' ? '✓ Točno!' : '✗ Nije točno. Pričekaj kraj runde.'}
+            ✓ Točno!
+          </div>
+        )}
+        {feedback === 'wrong' && !submitted && (
+          <div style={{
+            padding: '10px 14px', borderRadius: 10, textAlign: 'center', fontSize: 14,
+            background: 'rgba(242,95,76,0.15)', color: '#F25F4C',
+          }}>
+            ✗ Krivo — pokušaj ponovno
           </div>
         )}
       </div>
