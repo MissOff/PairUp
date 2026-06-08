@@ -50,10 +50,9 @@ const PROFILE_QUESTIONS = [
 // ---------- RULEBOOK (shown to participants on join, before profile) ----------
 // EDIT THESE 5 POINTS — these are placeholders.
 const RULEBOOK = [
-  "Igra ima 10 rundi raspoređenih u 3 kategorije - Upoznaj svog para; Izazov ili zagonetka; Brza igra.",
+  "Igra ima 10 rundi raspoređenih u 3 kategorije.",
   "Tvoj par mijenja se svaku rundu — pronađi osobu s istom bojom na ekranu.",
-  "Svaka runda (i uparivanje) ima vremensko ograničenje. Budi brz!",
-  "U igri zagonetki, odgovaraš zajedno sa svojim parom - budite što brži!",
+  "Svaka runda ima vremensko ograničenje. Budi brz!",
   "Bodovi se zbrajaju kroz cijelu igru — pobjednik se otkriva na kraju.",
   "Najvažnije — zabavi se i upoznaj nove ljude!",
 ];
@@ -115,7 +114,8 @@ const CATEGORY_ANNOUNCE_MS = 2_500;
 const BETWEEN_MS  = 1_500;
 const CLICKING_COUNTDOWN_MS = 3_000;
 const TIEBREAKER_ANNOUNCE_MS = 4_000;
-const TIEBREAKER_ACTIVE_MS = 15_000;
+const TIEBREAKER_COUNTDOWN_MS = 3_000;  // "Pripremi se za igru" 3-2-1 before clicking starts
+const TIEBREAKER_ACTIVE_MS = TIEBREAKER_COUNTDOWN_MS + 15_000; // 3s prep + 15s clicking
 
 function getCategoryForRound(session, round) {
   const order = session?.categoryOrder || ['get-to-know','get-to-know','get-to-know','get-to-know','riddles','riddles','riddles','mini-games','mini-games','mini-games'];
@@ -1350,31 +1350,38 @@ function FinalLeaderboard({ session }) {
 
 function StatsBlock({ stats }) {
   if (!stats) return null;
+  // Each block: the leading sentence template with the gender-appropriate adjective.
+  // {v} is replaced with the mode answer (ties shown joined with " i ").
   const blocks = [
-    { key: 'season', label: 'Godišnja doba' },
-    { key: 'snack',  label: 'Snackovi' },
-    { key: 'drink',  label: 'Pića' },
+    { key: 'season', sentence: 'Najdraže godišnje doba igrača je' },
+    { key: 'snack',  sentence: 'Najdraži snack igrača je' },
+    { key: 'drink',  sentence: 'Najdraže piće igrača je' },
   ];
+  const summaries = blocks.map(b => {
+    const entries = Object.entries(stats[b.key] || {});
+    if (entries.length === 0) return null;
+    const maxCount = Math.max(...entries.map(([_, c]) => c));
+    const modes = entries.filter(([_, c]) => c === maxCount).map(([v]) => v);
+    return { key: b.key, sentence: b.sentence, values: modes, count: maxCount };
+  }).filter(Boolean);
+  if (summaries.length === 0) return null;
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginTop: 8 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 8 }}>
       <div style={{ fontSize: 11, letterSpacing: '0.2em', color: 'rgba(255,255,254,0.5)' }}>STATISTIKE</div>
-      {blocks.map(b => {
-        const entries = Object.entries(stats[b.key] || {}).sort((a, b) => b[1] - a[1]);
-        if (entries.length === 0) return null;
-        return (
-          <div key={b.key} style={{ background: 'rgba(255,255,254,0.04)', borderRadius: 10, padding: 12 }}>
-            <div style={{ fontSize: 12, color: 'rgba(255,255,254,0.6)', marginBottom: 8 }}>{b.label}</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {entries.slice(0, 5).map(([v, c]) => (
-                <div key={v} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14 }}>
-                  <span style={{ textTransform: 'capitalize' }}>{v}</span>
-                  <span style={{ color: '#FF8906', fontWeight: 600 }}>{c}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      })}
+      {summaries.map(s => (
+        <div key={s.key} style={{
+          background: 'rgba(255,255,254,0.04)', borderRadius: 10,
+          padding: '12px 14px', fontSize: 15, lineHeight: 1.5,
+        }}>
+          <span style={{ color: 'rgba(255,255,254,0.7)' }}>{s.sentence}</span>{' '}
+          <strong style={{ color: '#FF8906', textTransform: 'capitalize' }}>
+            {s.values.join(' i ')}
+          </strong>
+          {s.values.length === 1 && s.count > 1 && (
+            <span style={{ color: 'rgba(255,255,254,0.4)', fontSize: 13 }}>{' '}({s.count}×)</span>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -2493,7 +2500,7 @@ function VotingScreen({ session, myId, myGroup }) {
           Je li bilo <em style={{ color: '#FF8906' }}>zabavno?</em>
         </h2>
         <p style={{ color: 'rgba(255,255,254,0.6)', fontSize: 14, lineHeight: 1.5 }}>
-          Ocijeni ovu aktivnost i svog para!
+          Ako svi u grupi daju palac gore, dobivate bod.
         </p>
       </div>
 
@@ -2570,7 +2577,19 @@ function TiebreakerScreen({ session, myId }) {
     return () => clearInterval(interval);
   }, [amContestant, isActive, myId, session.code]);
 
-  const tap = () => { if (isActive) setLocalTaps(t => t + 1); };
+  // Live clock for countdown display
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!isActive) return;
+    const id = setInterval(() => setNow(Date.now()), 200);
+    return () => clearInterval(id);
+  }, [isActive]);
+  const tbStartedAt = (session.tiebreakerDeadline || 0) - TIEBREAKER_ACTIVE_MS;
+  const tbCountdownEnd = tbStartedAt + TIEBREAKER_COUNTDOWN_MS;
+  const inCountdown = isActive && now < tbCountdownEnd;
+  const countdownSec = Math.max(0, Math.ceil((tbCountdownEnd - now) / 1000));
+
+  const tap = () => { if (isActive && !inCountdown) setLocalTaps(t => t + 1); };
 
   // ----- ANNOUNCE -----
   if (isAnnounce) {
@@ -2596,6 +2615,26 @@ function TiebreakerScreen({ session, myId }) {
           ))}
         </div>
         <Countdown deadline={session.tiebreakerAnnounceDeadline} urgentAt={2} />
+      </div>
+    );
+  }
+
+  // ----- 3-2-1 PREP COUNTDOWN (first 3s of tiebreaker-active for both contestants and spectators) -----
+  if (inCountdown) {
+    return (
+      <div className="pu-shell pu-fade" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center', gap: 30 }}>
+        <div style={{ fontSize: 11, letterSpacing: '0.3em', color: '#FF8906' }}>STANDOFF</div>
+        <div className="pu-display" style={{ fontSize: 42, lineHeight: 1.1 }}>
+          Pripremi se za <em style={{ color: '#FF8906' }}>igru.</em>
+        </div>
+        <div className="pu-display" style={{
+          fontSize: 160, color: '#FF8906', fontWeight: 800, lineHeight: 1,
+        }}>
+          {countdownSec > 0 ? countdownSec : 'KRENI!'}
+        </div>
+        <p style={{ color: 'rgba(255,255,254,0.6)', fontSize: 14, maxWidth: 320 }}>
+          {amContestant ? 'Klikaj što brže možeš.' : 'Gledaj uživo tko vodi.'}
+        </p>
       </div>
     );
   }
