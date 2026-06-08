@@ -50,9 +50,10 @@ const PROFILE_QUESTIONS = [
 // ---------- RULEBOOK (shown to participants on join, before profile) ----------
 // EDIT THESE 5 POINTS — these are placeholders.
 const RULEBOOK = [
-  "Igra ima 10 rundi raspoređenih u 3 kategorije.",
+  "Igra ima 10 rundi raspoređenih u 3 kategorije - Upoznaj svog para; Izazov ili zagonetka; Brza igra",
   "Tvoj par mijenja se svaku rundu — pronađi osobu s istom bojom na ekranu.",
-  "Svaka runda ima vremensko ograničenje. Budi brz!",
+  "Svaka runda (i uparivanje) ima vremensko ograničenje. Budi brz!",
+  "U igri zagonetki odgovaraš sa svojim parom - dogovori se i pronađi točan odgovor.",
   "Bodovi se zbrajaju kroz cijelu igru — pobjednik se otkriva na kraju.",
   "Najvažnije — zabavi se i upoznaj nove ljude!",
 ];
@@ -77,7 +78,7 @@ const GET_TO_KNOW = [
 // Riddles & challenges — mix of equations (1 correct answer) and challenges (thumbs)
 const RIDDLES = [
   // Challenges — type 'challenge', thumbs voting
-  { type: 'challenge', prompt: "Ispričaj najsmiješniji vic koji znaš." },
+  { type: 'challenge', prompt: "Nasmij svog partnera nekom forom ili vicem." },
   { type: 'challenge', prompt: "Osmisli zdravicu sa svojim parom, i nazdravi vašem prijateljstvu." },
   // Equations — type 'equation', exact match (case-insensitive, ignore extra spaces)
   // 2 mathematical:
@@ -86,7 +87,7 @@ const RIDDLES = [
   // 3 verbal (Croatian):
   { type: 'equation', prompt: "Što više sušiš, to postaje sve vlažnije. Što je to?", answers: ['ručnik', 'rucnik'] },
   { type: 'equation', prompt: "Imam glavu i rep, ali nemam tijelo. Što sam ja?", answers: ['kovanica', 'novčić', 'novcic', 'kuna', 'euro'] },
-  { type: 'equation', prompt: "Što ima oko, ali ne vidi?", answers: ['igla', 'iglu'] },
+  { type: 'equation', prompt: "Što uvijek dolazi, a nikad ne stiže?", answers: ['sutra'] },
 ];
 
 // Mini games — 3 specific games per spec
@@ -113,7 +114,7 @@ const TRIAD_ANNOUNCE_MS = 3_000;
 const CATEGORY_ANNOUNCE_MS = 2_500;
 const BETWEEN_MS  = 1_500;
 const CLICKING_COUNTDOWN_MS = 3_000;
-const TIEBREAKER_ANNOUNCE_MS = 4_000;
+const TIEBREAKER_ANNOUNCE_MS = 8_000;
 const TIEBREAKER_COUNTDOWN_MS = 3_000;  // "Pripremi se za igru" 3-2-1 before clicking starts
 const TIEBREAKER_ACTIVE_MS = TIEBREAKER_COUNTDOWN_MS + 15_000; // 3s prep + 15s clicking
 
@@ -1874,7 +1875,7 @@ function PairingScreen({ session, myId, myGroup }) {
         {color.name}.
       </div>
       <div style={{ fontSize: 16, opacity: 0.7, marginBottom: 16, fontStyle: 'italic' }}>
-        {myGroup.length === 3 ? 'Pronađi još DVIJE osobe iste boje.' : 'Pronađi osobu iste boje.'}
+        {myGroup.length === 3 ? 'Pronađi još DVIJE osobe iste boje. Požuri - ako ne nađeš grupu, preskačeš rundu.' : 'Pronađi osobu iste boje. Požuri - ako ne nađeš para, preskačeš rundu.'}
       </div>
       <div style={{
         height: 4, width: 80, background: color.text, opacity: 0.4, borderRadius: 2, marginBottom: 16,
